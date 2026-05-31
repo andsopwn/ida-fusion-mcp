@@ -1,0 +1,821 @@
+"""Debugger operations for ida-fusion-mcp.
+
+This module provides comprehensive debugging functionality including:
+- Debugger control (start, exit, continue, step, run_to)
+- Breakpoint management (add, delete, enable/disable, list)
+- Register inspection (all registers, GP registers, specific registers)
+- Memory operations (read/write debugger memory)
+- Call stack inspection
+"""
+
+import os
+from typing import Annotated
+
+import idc
+import ida_dbg
+import ida_idd
+import ida_idaapi
+import ida_name
+import idaapi
+
+from . import compat
+from .rpc import tool, unsafe, ext
+from .sync import idasync, IDAError
+from .utils import (
+    RegisterValue,
+    ThreadRegisters,
+    Breakpoint,
+    BreakpointConditionOp,
+    BreakpointOp,
+    MemoryRead,
+    MemoryPatch,
+    normalize_list_input,
+    normalize_dict_list,
+    parse_address,
+)
+
+
+# ============================================================================
+# Constants and Helper Functions
+# ============================================================================
+
+GENERAL_PURPOSE_REGISTERS = {
+    "EAX",
+    "EBX",
+    "ECX",
+    "EDX",
+    "ESI",
+    "EDI",
+    "EBP",
+    "ESP",
+    "EIP",
+    "RAX",
+    "RBX",
+    "RCX",
+    "RDX",
+    "RSI",
+    "RDI",
+    "RBP",
+    "RSP",
+    "RIP",
+    "R8",
+    "R9",
+    "R10",
+    "R11",
+    "R12",
+    "R13",
+    "R14",
+    "R15",
+}
+
+
+def _get_process_state_name() -> str:
+    if not ida_dbg.is_debugger_on():
+        return "not_running"
+
+    state = ida_dbg.get_process_state()
+    if state == ida_dbg.DSTATE_SUSP:
+        return "suspended"
+    if state == ida_dbg.DSTATE_RUN:
+        return "running"
+    if state == ida_dbg.DSTATE_NOTASK:
+        return "not_running"
+    return f"unknown({state})"
+
+
+def _get_debug_state_result() -> dict:
+    state = _get_process_state_name()
+    result = {"state": state}
+    if state == "running":
+        result["running"] = True
+    elif state == "suspended":
+        result["suspended"] = True
+        ip = ida_dbg.get_ip_val()
+        if ip is not None:
+            result["ip"] = hex(ip)
+    return result
+
+
+def dbg_ensure_running() -> "ida_idd.debugger_t":
+    dbg = ida_idd.get_dbg()
+    if not dbg:
+        raise IDAError("Debugger not running")
+    if ida_dbg.get_ip_val() is None:
+        raise IDAError("Debugger not running")
+    return dbg
+
+
+def _get_registers_for_thread(dbg: "ida_idd.debugger_t", tid: int) -> ThreadRegisters:
+    """Helper to get registers for a specific thread."""
+    regs = []
+    regvals: ida_idd.regvals_t = ida_dbg.get_reg_vals(tid)
+    for reg_index, rv in enumerate(regvals):
+        rv: ida_idd.regval_t
+        reg_info = dbg.regs(reg_index)
+
+        try:
+            reg_value = rv.pyval(reg_info.dtype)
+        except ValueError:
+            reg_value = ida_idaapi.BADADDR
+
+        if isinstance(reg_value, int):
+            reg_value = hex(reg_value)
+        if isinstance(reg_value, bytes):
+            reg_value = reg_value.hex(" ")
+        else:
+            reg_value = str(reg_value)
+        regs.append(
+            RegisterValue(
+                name=reg_info.name,
+                value=reg_value,
+            )
+        )
+    return ThreadRegisters(
+        thread_id=tid,
+        registers=regs,
+    )
+
+
+def _get_registers_general_for_thread(
+    dbg: "ida_idd.debugger_t", tid: int
+) -> ThreadRegisters:
+    """Helper to get general-purpose registers for a specific thread."""
+    all_registers = _get_registers_for_thread(dbg, tid)
+    general_registers = [
+        reg
+        for reg in all_registers["registers"]
+        if reg["name"] in GENERAL_PURPOSE_REGISTERS
+    ]
+    return ThreadRegisters(
+        thread_id=tid,
+        registers=general_registers,
+    )
+
+
+def _get_registers_specific_for_thread(
+    dbg: "ida_idd.debugger_t", tid: int, register_names: list[str]
+) -> ThreadRegisters:
+    """Helper to get specific registers for a given thread."""
+    all_registers = _get_registers_for_thread(dbg, tid)
+    specific_registers = [
+        reg for reg in all_registers["registers"] if reg["name"] in register_names
+    ]
+    return ThreadRegisters(
+        thread_id=tid,
+        registers=specific_registers,
+    )
+
+
+def _normalize_breakpoint_language(language: object) -> str | None:
+    if language is None:
+        return None
+    text = str(language).strip()
+    if not text:
+        return None
+    lowered = text.lower()
+    if lowered == "idc":
+        return "IDC"
+    if lowered == "python":
+        return "Python"
+    return text
+
+
+def _get_breakpoint_language(bpt: ida_dbg.bpt_t) -> str | None:
+    language = getattr(bpt, "elang", None)
+    if language is None:
+        return None
+    text = str(language).strip()
+    return text or None
+
+
+def _set_breakpoint_language(bpt: ida_dbg.bpt_t, language: str) -> None:
+    setter = getattr(bpt, "set_cnd_elang", None)
+    if callable(setter):
+        if not setter(language):
+            raise IDAError(f"Failed to set breakpoint condition language to {language}")
+        return
+    try:
+        setattr(bpt, "elang", language)
+    except Exception as exc:
+        raise IDAError(
+            f"Failed to set breakpoint condition language to {language}"
+        ) from exc
+
+
+def list_breakpoints():
+    breakpoints: list[Breakpoint] = []
+    for i in range(ida_dbg.get_bpt_qty()):
+        bpt = ida_dbg.bpt_t()
+        if ida_dbg.getn_bpt(i, bpt):
+            breakpoints.append(
+                Breakpoint(
+                    addr=hex(bpt.ea),
+                    enabled=bool(bpt.flags & ida_dbg.BPT_ENABLED),
+                    condition=str(bpt.condition) if bpt.condition else None,
+                    language=_get_breakpoint_language(bpt),
+                )
+            )
+    return breakpoints
+
+
+# ============================================================================
+# Debugger Control Operations
+# ============================================================================
+
+
+@ext("dbg")
+@unsafe
+@tool
+@idasync
+def dbg_start():
+    """Start debugger"""
+    if len(list_breakpoints()) == 0:
+        for i in range(compat.get_entry_qty()):
+            ordinal = compat.get_entry_ordinal(i)
+            addr = compat.get_entry(ordinal)
+            if addr != ida_idaapi.BADADDR:
+                ida_dbg.add_bpt(addr, 0, idaapi.BPT_SOFT)
+
+    if idaapi.start_process("", "", "") == 1:
+        ip = ida_dbg.get_ip_val()
+        if ip is not None:
+            return hex(ip)
+    raise IDAError("Failed to start debugger")
+
+
+@ext("dbg")
+@unsafe
+@tool
+@idasync
+def dbg_status() -> dict:
+    """Return debugger lifecycle state and current IP if suspended."""
+    return _get_debug_state_result()
+
+
+@ext("dbg")
+@unsafe
+@tool
+@idasync
+def dbg_exit():
+    """Exit debugger"""
+    dbg_ensure_running()
+    if idaapi.exit_process():
+        return
+    raise IDAError("Failed to exit debugger")
+
+
+@ext("dbg")
+@unsafe
+@tool
+@idasync
+def dbg_continue() -> str:
+    """Continue debugger"""
+    dbg_ensure_running()
+    if idaapi.continue_process():
+        ip = ida_dbg.get_ip_val()
+        if ip is not None:
+            return hex(ip)
+    raise IDAError("Failed to continue debugger")
+
+
+@ext("dbg")
+@unsafe
+@tool
+@idasync
+def dbg_run_to(
+    addr: Annotated[str, "Address"],
+):
+    """Run to address"""
+    dbg_ensure_running()
+    ea = parse_address(addr)
+    if idaapi.run_to(ea):
+        ip = ida_dbg.get_ip_val()
+        if ip is not None:
+            return hex(ip)
+    raise IDAError(f"Failed to run to address {hex(ea)}")
+
+
+@ext("dbg")
+@unsafe
+@tool
+@idasync
+def dbg_step_into():
+    """Step into"""
+    dbg_ensure_running()
+    if idaapi.step_into():
+        ip = ida_dbg.get_ip_val()
+        if ip is not None:
+            return hex(ip)
+    raise IDAError("Failed to step into")
+
+
+@ext("dbg")
+@unsafe
+@tool
+@idasync
+def dbg_step_over():
+    """Step over"""
+    dbg_ensure_running()
+    if idaapi.step_over():
+        ip = ida_dbg.get_ip_val()
+        if ip is not None:
+            return hex(ip)
+    raise IDAError("Failed to step over")
+
+
+# ============================================================================
+# Breakpoint Operations
+# ============================================================================
+
+
+@ext("dbg")
+@unsafe
+@tool
+@idasync
+def dbg_bps():
+    """List breakpoints"""
+    return list_breakpoints()
+
+
+@ext("dbg")
+@unsafe
+@tool
+@idasync
+def dbg_add_bp(
+    addrs: Annotated[list[str] | str, "Address(es) to add breakpoints at"],
+) -> list[dict]:
+    """Add breakpoints"""
+    addrs = normalize_list_input(addrs)
+    results = []
+
+    for addr in addrs:
+        try:
+            ea = parse_address(addr)
+            if idaapi.add_bpt(ea, 0, idaapi.BPT_SOFT):
+                results.append({"addr": addr, "ok": True})
+            else:
+                breakpoints = list_breakpoints()
+                for bpt in breakpoints:
+                    if bpt["addr"] == hex(ea):
+                        results.append({"addr": addr, "ok": True})
+                        break
+                else:
+                    results.append({"addr": addr, "error": "Failed to set breakpoint"})
+        except Exception as e:
+            results.append({"addr": addr, "error": str(e)})
+
+    return results
+
+
+@ext("dbg")
+@unsafe
+@tool
+@idasync
+def dbg_delete_bp(
+    addrs: Annotated[list[str] | str, "Address(es) to delete breakpoints from"],
+) -> list[dict]:
+    """Delete breakpoints"""
+    addrs = normalize_list_input(addrs)
+    results = []
+
+    for addr in addrs:
+        try:
+            ea = parse_address(addr)
+            if idaapi.del_bpt(ea):
+                results.append({"addr": addr, "ok": True})
+            else:
+                results.append({"addr": addr, "error": "Failed to delete breakpoint"})
+        except Exception as e:
+            results.append({"addr": addr, "error": str(e)})
+
+    return results
+
+
+@ext("dbg")
+@unsafe
+@tool
+@idasync
+def dbg_toggle_bp(items: list[BreakpointOp] | BreakpointOp) -> list[dict]:
+    """Enable/disable breakpoints"""
+
+    items = normalize_dict_list(items)
+
+    results = []
+    for item in items:
+        addr = item.get("addr", "")
+        enable = item.get("enabled", True)
+
+        try:
+            ea = parse_address(addr)
+            if idaapi.enable_bpt(ea, enable):
+                results.append({"addr": addr, "ok": True})
+            else:
+                results.append(
+                    {
+                        "addr": addr,
+                        "error": f"Failed to {'enable' if enable else 'disable'} breakpoint",
+                    }
+                )
+        except Exception as e:
+            results.append({"addr": addr, "error": str(e)})
+
+    return results
+
+
+@ext("dbg")
+@unsafe
+@tool
+@idasync
+def dbg_set_bp_condition(
+    items: list[BreakpointConditionOp] | BreakpointConditionOp,
+) -> list[dict]:
+    """Set or clear breakpoint conditions in batch."""
+
+    items = normalize_dict_list(items)
+
+    results = []
+    for item in items:
+        addr = item.get("addr", "")
+        condition = item.get("condition")
+        language = _normalize_breakpoint_language(item.get("language"))
+        low_level = bool(item.get("low_level", False))
+
+        try:
+            ea = parse_address(addr)
+            bpt = ida_dbg.bpt_t()
+            if not ida_dbg.get_bpt(ea, bpt):
+                results.append({"addr": addr, "error": "Breakpoint not found"})
+                continue
+
+            condition_text = "" if condition is None else str(condition)
+            current_language = _get_breakpoint_language(bpt)
+            current_condition = str(bpt.condition) if bpt.condition else None
+
+            if language is not None and language != current_language:
+                if current_condition and condition_text:
+                    if not idc.set_bpt_cond(ea, "", 1 if low_level else 0):
+                        results.append(
+                            {
+                                "addr": addr,
+                                "error": "Failed to clear existing breakpoint condition before changing its language",
+                            }
+                        )
+                        continue
+                    if not ida_dbg.get_bpt(ea, bpt):
+                        results.append(
+                            {
+                                "addr": addr,
+                                "error": "Breakpoint condition was cleared, but breakpoint could not be reloaded to update its language",
+                            }
+                        )
+                        continue
+
+                _set_breakpoint_language(bpt, language)
+                if not ida_dbg.update_bpt(bpt):
+                    results.append(
+                        {
+                            "addr": addr,
+                            "error": f"Failed to apply breakpoint condition language {language}",
+                        }
+                    )
+                    continue
+
+            if not idc.set_bpt_cond(ea, condition_text, 1 if low_level else 0):
+                results.append({"addr": addr, "error": "Failed to set breakpoint condition"})
+                continue
+
+            updated = ida_dbg.bpt_t()
+            if not ida_dbg.get_bpt(ea, updated):
+                results.append(
+                    {
+                        "addr": addr,
+                        "error": "Breakpoint condition was set, but breakpoint could not be reloaded for validation",
+                    }
+                )
+                continue
+
+            is_compiled = getattr(updated, "is_compiled", None)
+            if condition_text and callable(is_compiled) and not is_compiled():
+                results.append(
+                    {
+                        "addr": addr,
+                        "error": "Breakpoint condition was stored but did not compile successfully",
+                    }
+                )
+                continue
+
+            results.append(
+                {
+                    "addr": addr,
+                    "ok": True,
+                    "condition": str(updated.condition) if updated.condition else None,
+                    "language": _get_breakpoint_language(updated),
+                }
+            )
+        except Exception as e:
+            results.append({"addr": addr, "error": str(e)})
+
+    return results
+
+
+# ============================================================================
+# Register Operations
+# ============================================================================
+
+
+@ext("dbg")
+@unsafe
+@tool
+@idasync
+def dbg_regs_all() -> list[ThreadRegisters]:
+    """Get all registers for all threads."""
+    result: list[ThreadRegisters] = []
+    dbg = dbg_ensure_running()
+    for thread_index in range(ida_dbg.get_thread_qty()):
+        tid = ida_dbg.getn_thread(thread_index)
+        result.append(_get_registers_for_thread(dbg, tid))
+    return result
+
+
+@ext("dbg")
+@unsafe
+@tool
+@idasync
+def dbg_regs(
+    filter: Annotated[str, "Register filter: 'all' (default), 'gp' (general-purpose only), or 'named'"] = "all",
+    names: Annotated[str, "Comma-separated register names (only used when filter='named', e.g. 'RAX,RBX,RCX')"] = "",
+) -> ThreadRegisters:
+    """Get registers for the current thread. Use filter='gp' for general-purpose
+    only, or filter='named' with names='RAX,RBX' to select specific registers."""
+    dbg = dbg_ensure_running()
+    tid = ida_dbg.get_current_thread()
+    if filter == "gp":
+        return _get_registers_general_for_thread(dbg, tid)
+    elif filter == "named":
+        name_list = [n.strip() for n in names.split(",") if n.strip()]
+        if not name_list:
+            raise IDAError("filter='named' requires non-empty 'names' parameter")
+        return _get_registers_specific_for_thread(dbg, tid, name_list)
+    else:
+        return _get_registers_for_thread(dbg, tid)
+
+
+@ext("dbg")
+@unsafe
+@tool
+@idasync
+def dbg_regs_remote(
+    tids: Annotated[list[int] | int, "Thread ID(s) to get registers for"],
+    filter: Annotated[str, "Register filter: 'all' (default), 'gp', or 'named'"] = "all",
+    names: Annotated[str, "Comma-separated register names (only used when filter='named')"] = "",
+) -> list[dict]:
+    """Get registers for specified thread(s). Use filter='gp' for general-purpose
+    only, or filter='named' with names='RAX,RBX' to select specific registers."""
+    if isinstance(tids, int):
+        tids = [tids]
+
+    dbg = dbg_ensure_running()
+    available_tids = [ida_dbg.getn_thread(i) for i in range(ida_dbg.get_thread_qty())]
+    name_list = [n.strip() for n in names.split(",") if n.strip()] if filter == "named" else []
+    results = []
+
+    for tid in tids:
+        try:
+            if tid not in available_tids:
+                results.append({"tid": tid, "regs": None, "error": f"Thread {tid} not found"})
+                continue
+            if filter == "gp":
+                regs = _get_registers_general_for_thread(dbg, tid)
+            elif filter == "named":
+                if not name_list:
+                    results.append({"tid": tid, "regs": None, "error": "filter='named' requires 'names'"})
+                    continue
+                regs = _get_registers_specific_for_thread(dbg, tid, name_list)
+            else:
+                regs = _get_registers_for_thread(dbg, tid)
+            results.append({"tid": tid, "regs": regs})
+        except Exception as e:
+            results.append({"tid": tid, "regs": None, "error": str(e)})
+
+    return results
+
+
+@ext("dbg")
+@unsafe
+@tool
+@idasync
+def dbg_gpregs_remote(
+    tids: Annotated[list[int] | int, "Thread ID(s) to get GP registers for"],
+) -> list[dict]:
+    """Get general-purpose registers for specified thread IDs."""
+    if isinstance(tids, int):
+        tids = [tids]
+
+    dbg = dbg_ensure_running()
+    available_tids = [ida_dbg.getn_thread(i) for i in range(ida_dbg.get_thread_qty())]
+    results = []
+
+    for tid in tids:
+        try:
+            if tid not in available_tids:
+                results.append({"tid": tid, "regs": None, "error": f"Thread {tid} not found"})
+                continue
+            regs = _get_registers_general_for_thread(dbg, tid)
+            results.append({"tid": tid, "regs": regs})
+        except Exception as e:
+            results.append({"tid": tid, "regs": None, "error": str(e)})
+
+    return results
+
+
+@ext("dbg")
+@unsafe
+@tool
+@idasync
+def dbg_gpregs() -> ThreadRegisters:
+    """Get general-purpose registers for the current thread."""
+    dbg = dbg_ensure_running()
+    tid = ida_dbg.get_current_thread()
+    return _get_registers_general_for_thread(dbg, tid)
+
+
+@ext("dbg")
+@unsafe
+@tool
+@idasync
+def dbg_regs_named_remote(
+    thread_id: Annotated[int, "Thread ID"],
+    register_names: Annotated[
+        str, "Comma-separated register names (e.g. 'RAX,RBX,RCX')"
+    ],
+) -> ThreadRegisters:
+    """Get selected registers for a specific thread ID."""
+    dbg = dbg_ensure_running()
+    if thread_id not in [ida_dbg.getn_thread(i) for i in range(ida_dbg.get_thread_qty())]:
+        raise IDAError(f"Thread with ID {thread_id} not found")
+    names = [name.strip() for name in register_names.split(",") if name.strip()]
+    if not names:
+        raise IDAError("register_names must not be empty")
+    return _get_registers_specific_for_thread(dbg, thread_id, names)
+
+
+@ext("dbg")
+@unsafe
+@tool
+@idasync
+def dbg_regs_named(
+    register_names: Annotated[
+        str, "Comma-separated register names (e.g. 'RAX,RBX,RCX')"
+    ],
+) -> ThreadRegisters:
+    """Get selected registers for the current thread."""
+    dbg = dbg_ensure_running()
+    tid = ida_dbg.get_current_thread()
+    names = [name.strip() for name in register_names.split(",") if name.strip()]
+    if not names:
+        raise IDAError("register_names must not be empty")
+    return _get_registers_specific_for_thread(dbg, tid, names)
+
+
+# ============================================================================
+# Call Stack Operations
+# ============================================================================
+
+
+@ext("dbg")
+@unsafe
+@tool
+@idasync
+def dbg_stacktrace() -> list[dict[str, str]]:
+    """Get call stack"""
+    callstack = []
+    try:
+        tid = ida_dbg.get_current_thread()
+        trace = ida_idd.call_stack_t()
+
+        if not ida_dbg.collect_stack_trace(tid, trace):
+            return []
+        for frame in trace:
+            frame_info = {
+                "addr": hex(frame.callea),
+            }
+            try:
+                module_info = ida_idd.modinfo_t()
+                if ida_dbg.get_module_info(frame.callea, module_info):
+                    frame_info["module"] = os.path.basename(module_info.name)
+                else:
+                    frame_info["module"] = "<unknown>"
+
+                name = (
+                    ida_name.get_nice_colored_name(
+                        frame.callea,
+                        ida_name.GNCN_NOCOLOR
+                        | ida_name.GNCN_NOLABEL
+                        | ida_name.GNCN_NOSEG
+                        | ida_name.GNCN_PREFDBG,
+                    )
+                    or "<unnamed>"
+                )
+                frame_info["symbol"] = name
+
+            except Exception as e:
+                frame_info["module"] = "<error>"
+                frame_info["symbol"] = str(e)
+
+            callstack.append(frame_info)
+
+    except Exception:
+        pass
+    return callstack
+
+
+# ============================================================================
+# Debugger Memory Operations
+# ============================================================================
+
+
+@ext("dbg")
+@unsafe
+@tool
+@idasync
+def dbg_read(regions: list[MemoryRead] | MemoryRead) -> list[dict]:
+    """Read debug memory"""
+
+    regions = normalize_dict_list(regions)
+    dbg_ensure_running()
+    results = []
+
+    _MAX_READ_SIZE = 1048576  # 1MB max per region
+
+    for region in regions:
+        try:
+            addr = parse_address(region["addr"])
+            size = region["size"]
+
+            # Security: enforce max read size to prevent memory exhaustion
+            if not isinstance(size, int) or size < 0 or size > _MAX_READ_SIZE:
+                raise ValueError(f"Size must be between 0 and {_MAX_READ_SIZE} (got {size})")
+
+            data = idaapi.dbg_read_memory(addr, size)
+            if data:
+                results.append(
+                    {
+                        "addr": region["addr"],
+                        "size": len(data),
+                        "data": data.hex(),
+                        "error": None,
+                    }
+                )
+            else:
+                results.append(
+                    {
+                        "addr": region["addr"],
+                        "size": 0,
+                        "data": None,
+                        "error": "Failed to read memory",
+                    }
+                )
+
+        except Exception as e:
+            results.append(
+                {"addr": region.get("addr"), "size": 0, "data": None, "error": str(e)}
+            )
+
+    return results
+
+
+@ext("dbg")
+@unsafe
+@tool
+@idasync
+def dbg_write(regions: list[MemoryPatch] | MemoryPatch) -> list[dict]:
+    """Write debug memory"""
+
+    regions = normalize_dict_list(regions)
+    dbg_ensure_running()
+    results = []
+
+    _MAX_WRITE_SIZE = 1048576  # 1MB max per region
+
+    for region in regions:
+        try:
+            addr = parse_address(region["addr"])
+            data = bytes.fromhex(region["data"])
+
+            if len(data) > _MAX_WRITE_SIZE:
+                raise ValueError(f"Write size {len(data)} exceeds maximum of {_MAX_WRITE_SIZE} bytes")
+
+            success = idaapi.dbg_write_memory(addr, data)
+            results.append(
+                {
+                    "addr": region["addr"],
+                    "size": len(data) if success else 0,
+                    "ok": success,
+                    "error": None if success else "Write failed",
+                }
+            )
+
+        except Exception as e:
+            results.append({"addr": region.get("addr"), "size": 0, "error": str(e)})
+
+    return results

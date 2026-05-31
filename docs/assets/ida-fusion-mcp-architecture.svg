@@ -1,0 +1,97 @@
+<svg width="1200" height="560" viewBox="0 0 1200 560" fill="none" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="title desc">
+  <title id="title">ida-fusion-mcp architecture</title>
+  <desc id="desc">One MCP client connects to ida-fusion-mcp, which routes requests to multiple IDA GUI and idalib instances while exposing ida-pro-mcp analysis tools.</desc>
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1200" y2="560" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#101827"/>
+      <stop offset="0.52" stop-color="#12243A"/>
+      <stop offset="1" stop-color="#172A2E"/>
+    </linearGradient>
+    <linearGradient id="router" x1="438" y1="147" x2="780" y2="319" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#2563EB"/>
+      <stop offset="1" stop-color="#0891B2"/>
+    </linearGradient>
+    <linearGradient id="tool" x1="802" y1="84" x2="1044" y2="236" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#F97316"/>
+      <stop offset="1" stop-color="#EAB308"/>
+    </linearGradient>
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="140%" color-interpolation-filters="sRGB">
+      <feDropShadow dx="0" dy="16" stdDeviation="16" flood-color="#020617" flood-opacity="0.35"/>
+    </filter>
+    <style>
+      .title { font: 700 34px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; fill: #F8FAFC; }
+      .subtitle { font: 500 18px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; fill: #CBD5E1; }
+      .label { font: 700 20px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; fill: #F8FAFC; }
+      .small { font: 500 14px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; fill: #DDE7F3; }
+      .tiny { font: 600 12px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; fill: #AFC2D7; letter-spacing: 0.4px; }
+      .chip { fill: rgba(255,255,255,0.12); stroke: rgba(255,255,255,0.18); }
+      .card { fill: rgba(255,255,255,0.08); stroke: rgba(255,255,255,0.16); }
+      .line { stroke: #7DD3FC; stroke-width: 3; stroke-linecap: round; stroke-dasharray: 8 10; opacity: 0.9; }
+      .solid { stroke: #E0F2FE; stroke-width: 3; stroke-linecap: round; opacity: 0.9; }
+    </style>
+  </defs>
+
+  <rect width="1200" height="560" rx="28" fill="url(#bg)"/>
+
+  <text x="58" y="70" class="title">ida-fusion-mcp</text>
+  <text x="58" y="102" class="subtitle">Multi-binary IDA Pro orchestration with ida-pro-mcp analysis depth</text>
+
+  <g filter="url(#shadow)">
+    <rect x="64" y="164" width="250" height="148" rx="16" class="card"/>
+    <text x="92" y="210" class="label">MCP Client</text>
+    <text x="92" y="242" class="small">Claude Code, Cursor,</text>
+    <text x="92" y="266" class="small">Codex, VS Code, Zed</text>
+    <rect x="92" y="282" width="134" height="28" rx="14" class="chip"/>
+    <text x="112" y="301" class="tiny">single endpoint</text>
+  </g>
+
+  <path d="M314 238 C360 238 372 238 420 238" class="solid"/>
+
+  <g filter="url(#shadow)">
+    <rect x="420" y="132" width="360" height="220" rx="20" fill="url(#router)"/>
+    <text x="460" y="184" class="label">Router + Registry</text>
+    <text x="460" y="218" class="small">explicit instance_id routing</text>
+    <text x="460" y="244" class="small">dynamic ports, heartbeats, stale cleanup</text>
+    <text x="460" y="270" class="small">static schemas before IDA is open</text>
+    <rect x="460" y="292" width="116" height="30" rx="15" class="chip"/>
+    <text x="482" y="312" class="tiny">k7m2</text>
+    <rect x="590" y="292" width="116" height="30" rx="15" class="chip"/>
+    <text x="612" y="312" class="tiny">px3a</text>
+    <rect x="720" y="292" width="38" height="30" rx="15" class="chip"/>
+    <text x="731" y="312" class="tiny">...</text>
+  </g>
+
+  <path d="M780 200 C826 164 844 156 894 156" class="line"/>
+  <path d="M780 244 C830 244 846 244 896 244" class="line"/>
+  <path d="M780 288 C826 326 848 340 896 340" class="line"/>
+
+  <g filter="url(#shadow)">
+    <rect x="896" y="92" width="236" height="118" rx="16" class="card"/>
+    <text x="926" y="132" class="label">IDA GUI #1</text>
+    <text x="926" y="162" class="small">malware.exe</text>
+    <text x="926" y="186" class="tiny">HTTP JSON-RPC</text>
+  </g>
+
+  <g filter="url(#shadow)">
+    <rect x="896" y="218" width="236" height="118" rx="16" class="card"/>
+    <text x="926" y="258" class="label">IDA GUI #2</text>
+    <text x="926" y="288" class="small">dropper.dll</text>
+    <text x="926" y="312" class="tiny">HTTP JSON-RPC</text>
+  </g>
+
+  <g filter="url(#shadow)">
+    <rect x="896" y="344" width="236" height="118" rx="16" class="card"/>
+    <text x="926" y="384" class="label">idalib Worker</text>
+    <text x="926" y="414" class="small">headless analysis</text>
+    <text x="926" y="438" class="tiny">isolated process</text>
+  </g>
+
+  <g filter="url(#shadow)">
+    <rect x="470" y="402" width="260" height="86" rx="16" fill="url(#tool)"/>
+    <text x="500" y="438" class="label">Ported Tool Layer</text>
+    <text x="500" y="466" class="small">signatures, types, search, debugger helpers</text>
+  </g>
+
+  <path d="M600 352 C600 374 600 384 600 402" class="solid"/>
+  <text x="58" y="506" class="tiny">Built for reverse engineering workflows where one investigation spans many binaries at once.</text>
+</svg>

@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=68.0", "setuptools-scm>=7.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ida-fusion-mcp"
+version = "0.1.0"
+description = "Multi-instance IDA Pro MCP server for simultaneous reverse engineering"
+readme = "README.md"
+requires-python = ">=3.11"
+license = {text = "MIT"}
+dependencies = []
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+]
+idalib = [
+    "idapro>=0.0.7",
+]
+
+[project.scripts]
+ida-fusion-mcp = "ida_fusion_mcp.__main__:main"
+ida-multi-mcp = "ida_fusion_mcp.__main__:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["ida_fusion_mcp*", "ida_multi_mcp*"]
+
+[tool.setuptools.package-data]
+ida_fusion_mcp = ["vendor/**/*", "ida_tool_schemas.json"]
