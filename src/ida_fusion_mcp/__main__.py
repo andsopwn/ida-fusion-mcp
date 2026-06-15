@@ -80,6 +80,8 @@ def _detect_ida_dir() -> str | None:
 
     seen: set[str] = set()
     for root in scan_roots:
+        if not root.is_dir():
+            continue
         try:
             for entry in root.iterdir():
                 if not entry.is_dir():
@@ -105,7 +107,7 @@ def _detect_ida_dir() -> str | None:
                 m = _IDA_VERSION_RE.search(entry.name)
                 ver = tuple(int(x) for x in m.group(1).split(".")) if m else (0, 0)
                 candidates.append((ver, resolved))
-        except PermissionError:
+        except (FileNotFoundError, PermissionError):
             continue
 
     if not candidates:
