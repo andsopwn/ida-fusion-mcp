@@ -13,7 +13,7 @@ import socket
 import subprocess
 import sys
 import time
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from .health import is_process_alive, ping_instance, query_binary_metadata
 
@@ -31,6 +31,8 @@ _IDALIB_NAMES = {
     "darwin": "libidalib.dylib",
     "linux": "libidalib.so",
 }
+_DEFAULT_MAX_OWNED_WORKERS = 4
+_OPEN_MODES = frozenset({"prefer_headless", "force_headless", "prefer_gui", "force_gui"})
 
 
 def is_idalib_available() -> bool:
@@ -78,6 +80,36 @@ def _find_free_port(host: str = "127.0.0.1") -> int:
         return s.getsockname()[1]
 
 
+def _max_owned_workers() -> int:
+    value = os.environ.get("IDA_MCP_MAX_IDALIB_WORKERS", "").strip()
+    if not value:
+        return _DEFAULT_MAX_OWNED_WORKERS
+    try:
+        return max(1, int(value))
+    except ValueError:
+        return _DEFAULT_MAX_OWNED_WORKERS
+
+
+def _normalized_path(value: str | None) -> str | None:
+    if not value or value == "unknown":
+        return None
+    value = os.path.expanduser(str(value))
+    return os.path.normcase(os.path.realpath(value))
+
+
+def _path_basename(value: str | None) -> str | None:
+    if not value or value == "unknown":
+        return None
+    return os.path.basename(str(value).replace("\\", "/")).casefold() or None
+
+
+def _entry_backend(info: dict[str, Any]) -> str:
+    entry_type = str(info.get("type", "gui") or "gui")
+    if entry_type == "idalib":
+        return "headless"
+    return "gui"
+
+
 class IdalibManager:
     """Manages headless idalib worker subprocesses.
 
@@ -110,12 +142,55 @@ class IdalibManager:
         host: str = "127.0.0.1",
         timeout: int = _READY_TIMEOUT,
         unsafe: bool = False,
+        mode: str = "prefer_headless",
+        preferred_instance_id: str | None = None,
+        idle_ttl_sec: int | None = None,
+        run_auto_analysis: bool = True,
+        build_caches: bool = True,
+        init_hexrays: bool = True,
     ) -> dict:
         """Spawn a headless idalib worker for *input_path*.
 
         Returns a dict with ``instance_id``, ``host``, ``port``, ``pid``,
         ``binary`` on success, or ``error`` on failure.
         """
+        mode = (mode or "prefer_headless").strip().lower()
+        if mode not in _OPEN_MODES:
+            return {"error": f"invalid mode: {mode!r}", "valid_modes": sorted(_OPEN_MODES)}
+
+        resolved_path = os.path.realpath(os.path.expanduser(input_path))
+        if not os.path.isfile(resolved_path):
+            return {"error": f"File not found: {input_path}"}
+
+        if preferred_instance_id:
+            preferred = self._select_preferred_instance(preferred_instance_id, mode, resolved_path)
+            if "error" in preferred:
+                return preferred
+            if preferred:
+                return preferred
+
+        if mode in ("prefer_gui", "force_gui"):
+            existing_gui = self._find_matching_instance(resolved_path, backend="gui")
+            if existing_gui is not None:
+                return existing_gui
+            if mode == "force_gui":
+                return {
+                    "error": "No matching GUI IDA instance is registered.",
+                    "hint": "Open the binary in IDA, start the MCP plugin, then call idalib_open again.",
+                }
+
+        existing_headless = self._find_matching_instance(resolved_path, backend="headless")
+        if existing_headless is not None:
+            return existing_headless
+
+        max_workers = _max_owned_workers()
+        owned_workers = self._owned_worker_count()
+        if owned_workers >= max_workers:
+            return {
+                "error": f"Maximum owned idalib workers reached ({owned_workers}/{max_workers}).",
+                "hint": "Close an idalib session or raise IDA_MCP_MAX_IDALIB_WORKERS.",
+            }
+
         if not is_idalib_available():
             return {
                 "error": (
@@ -124,10 +199,6 @@ class IdalibManager:
                     "Ensure IDADIR points to an IDA Pro installation."
                 )
             }
-
-        resolved_path = os.path.realpath(input_path)
-        if not os.path.isfile(resolved_path):
-            return {"error": f"File not found: {input_path}"}
 
         port = _find_free_port(host)
 
@@ -139,6 +210,14 @@ class IdalibManager:
         ]
         if unsafe:
             cmd.append("--unsafe")
+        if not run_auto_analysis:
+            cmd.append("--no-auto-analysis")
+        if not build_caches:
+            cmd.append("--no-build-caches")
+        if not init_hexrays:
+            cmd.append("--no-init-hexrays")
+        if idle_ttl_sec is not None:
+            cmd.extend(["--idle-ttl-sec", str(int(idle_ttl_sec))])
         cmd.append(resolved_path)
 
         creation_flags = 0
@@ -193,6 +272,15 @@ class IdalibManager:
             binary_name=binary_name,
             binary_path=resolved_path,
             type="idalib",
+            backend="headless",
+            owned=True,
+            adopted=False,
+            worker_pid=proc.pid,
+            input_path=resolved_path,
+            idle_ttl_sec=idle_ttl_sec,
+            run_auto_analysis=run_auto_analysis,
+            build_caches=build_caches,
+            init_hexrays=init_hexrays,
         )
 
         self._processes[instance_id] = proc
@@ -202,6 +290,9 @@ class IdalibManager:
             "port": port,
             "pid": proc.pid,
             "binary": binary_name,
+            "backend": "headless",
+            "owned": True,
+            "adopted": False,
         }
 
     def close_session(self, instance_id: str) -> dict:
@@ -295,6 +386,91 @@ class IdalibManager:
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
+
+    def _owned_worker_count(self) -> int:
+        pids: set[int] = set()
+        for iid, proc in list(self._processes.items()):
+            if is_process_alive(proc.pid):
+                pids.add(proc.pid)
+                continue
+            del self._processes[iid]
+            self.registry.unregister(iid)
+        for info in self.registry.list_instances().values():
+            if info.get("type") != "idalib" or not info.get("owned", False):
+                continue
+            pid = info.get("pid")
+            if not isinstance(pid, int) or pid <= 0:
+                continue
+            if is_process_alive(pid):
+                pids.add(pid)
+        return len(pids)
+
+    def _select_preferred_instance(self, instance_id: str, mode: str, input_path: str) -> dict:
+        info = self.registry.get_instance(instance_id)
+        if info is None:
+            return {"error": f"Preferred instance '{instance_id}' not found"}
+        backend = _entry_backend(info)
+        if mode == "force_headless" and backend != "headless":
+            return {"error": f"Preferred instance '{instance_id}' is not headless"}
+        if mode == "force_gui" and backend != "gui":
+            return {"error": f"Preferred instance '{instance_id}' is not a GUI instance"}
+        if not self._matches_input_path(info, input_path):
+            return {"error": f"Preferred instance '{instance_id}' does not match input_path"}
+        if not self._is_reachable(info):
+            return {"error": f"Preferred instance '{instance_id}' is not reachable"}
+        return self._existing_result(instance_id, info, note="preferred_instance")
+
+    def _find_matching_instance(self, input_path: str, *, backend: str) -> dict | None:
+        for iid, info in self.registry.list_instances().items():
+            if _entry_backend(info) != backend:
+                continue
+            if not self._matches_input_path(info, input_path):
+                continue
+            if not self._is_reachable(info):
+                continue
+            note = "matched_gui_instance" if backend == "gui" else "adopted_existing_headless"
+            return self._existing_result(iid, info, note=note)
+        return None
+
+    def _matches_input_path(self, info: dict[str, Any], input_path: str) -> bool:
+        wanted = _normalized_path(input_path)
+        wanted_name = _path_basename(input_path)
+        path_candidates: list[str] = []
+        for key in ("input_path", "binary_path", "idb_path"):
+            value = info.get(key)
+            candidate = _normalized_path(value)
+            if candidate:
+                path_candidates.append(candidate)
+            if wanted and candidate and wanted == candidate:
+                return True
+        if path_candidates:
+            return False
+        for key in ("binary_name", "binary_path", "idb_path", "input_path"):
+            if wanted_name and wanted_name == _path_basename(info.get(key)):
+                return True
+        return False
+
+    def _is_reachable(self, info: dict[str, Any]) -> bool:
+        pid = info.get("pid")
+        if isinstance(pid, int) and pid > 0 and not is_process_alive(pid):
+            return False
+        host = info.get("host", "127.0.0.1")
+        port = info.get("port", 0)
+        return isinstance(port, int) and ping_instance(host, port, timeout=5.0)
+
+    def _existing_result(self, instance_id: str, info: dict[str, Any], *, note: str) -> dict:
+        backend = _entry_backend(info)
+        return {
+            "instance_id": instance_id,
+            "host": info.get("host", "127.0.0.1"),
+            "port": info.get("port", 0),
+            "pid": info.get("pid", 0),
+            "binary": info.get("binary_name", "unknown"),
+            "backend": backend,
+            "owned": bool(info.get("owned", False)),
+            "adopted": True,
+            "note": note,
+        }
 
     def _wait_for_ready(
         self,

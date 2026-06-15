@@ -51,6 +51,11 @@ def list_instances() -> dict:
             "host": info.get("host", "127.0.0.1"),
             "port": info.get("port", 0),
             "pid": info.get("pid", 0),
+            "backend": info.get("backend", "ida-gui" if info.get("type", "gui") == "gui" else "headless"),
+            "owned": bool(info.get("owned", False)),
+            "adopted": bool(info.get("adopted", False)),
+            "worker_pid": info.get("worker_pid"),
+            "idle_ttl_sec": info.get("idle_ttl_sec"),
             "registered_at": info.get("registered_at", ""),
         })
     return {

@@ -332,6 +332,10 @@ def rediscover_instances(registry: "InstanceRegistry") -> list[str]:
             binary_path=metadata.get("input_file", ""),
             arch=metadata.get("arch", "unknown"),
             host=host,
+            type="gui",
+            backend="ida-gui",
+            owned=False,
+            adopted=True,
         )
         registered.append(instance_id)
         print(f"[ida-fusion-mcp] Auto-discovered instance '{instance_id}' "

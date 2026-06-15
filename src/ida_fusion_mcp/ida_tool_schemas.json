@@ -1252,6 +1252,62 @@
     }
   },
   {
+    "name": "add_bookmark",
+    "description": "Add or replace the IDA bookmark at an address.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "addr": {
+          "type": "string",
+          "description": "Address to bookmark"
+        },
+        "name": {
+          "type": "string",
+          "description": "Bookmark label text after the prefix"
+        },
+        "prefix": {
+          "type": "string",
+          "description": "Optional title prefix. Defaults to 'idaMCP: '; pass '' for no prefix."
+        }
+      },
+      "required": [
+        "addr",
+        "name"
+      ]
+    },
+    "outputSchema": {
+      "type": "object",
+      "properties": {
+        "addr": {
+          "type": "string"
+        },
+        "ea": {
+          "type": "string"
+        },
+        "slot": {
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "title": {
+          "type": "string"
+        },
+        "prefix": {
+          "type": "string"
+        },
+        "ok": {
+          "type": "boolean"
+        },
+        "error": {
+          "type": "string"
+        }
+      },
+      "required": [],
+      "additionalProperties": false
+    }
+  },
+  {
     "name": "set_comments",
     "description": "Set comments at addresses (both disassembly and decompiler views)",
     "inputSchema": {
@@ -1931,6 +1987,268 @@
           },
           "length": {
             "type": "integer"
+          },
+          "error": {
+            "type": "string"
+          }
+        },
+        "required": [],
+        "additionalProperties": false
+      }
+    }
+  },
+  {
+    "name": "force_recompile",
+    "description": "Invalidate the Hex-Rays decompile cache for one or more functions.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "items": {
+          "anyOf": [
+            {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "addr": {
+                    "type": "string",
+                    "description": "Function entry address, or address inside a function"
+                  }
+                },
+                "required": [],
+                "additionalProperties": false
+              }
+            },
+            {
+              "type": "object",
+              "properties": {
+                "addr": {
+                  "type": "string",
+                  "description": "Function entry address, or address inside a function"
+                }
+              },
+              "required": [],
+              "additionalProperties": false
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Omit or pass an empty list to invalidate every function"
+        }
+      },
+      "required": []
+    },
+    "outputSchema": {
+      "type": "object",
+      "properties": {
+        "summary": {
+          "type": "object"
+        },
+        "results": {
+          "type": "array",
+          "items": {
+            "type": "object"
+          }
+        }
+      },
+      "required": [
+        "summary",
+        "results"
+      ]
+    }
+  },
+  {
+    "name": "set_op_type",
+    "description": "Set the interpretation of an instruction operand.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "items": {
+          "anyOf": [
+            {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "addr": {
+                    "type": "string",
+                    "description": "Instruction address"
+                  },
+                  "op_n": {
+                    "type": "integer",
+                    "description": "Operand index, zero-based"
+                  },
+                  "kind": {
+                    "type": "string",
+                    "description": "stroff, offset, stkvar, hex, dec, char, binary, or octal"
+                  },
+                  "struct": {
+                    "type": "string",
+                    "description": "Struct name for kind=stroff"
+                  },
+                  "delta": {
+                    "type": "integer",
+                    "description": "Struct offset delta for kind=stroff"
+                  },
+                  "target_addr": {
+                    "type": "string",
+                    "description": "Optional target address for kind=offset"
+                  }
+                },
+                "required": [],
+                "additionalProperties": false
+              }
+            },
+            {
+              "type": "object",
+              "properties": {
+                "addr": {
+                  "type": "string",
+                  "description": "Instruction address"
+                },
+                "op_n": {
+                  "type": "integer",
+                  "description": "Operand index, zero-based"
+                },
+                "kind": {
+                  "type": "string",
+                  "description": "stroff, offset, stkvar, hex, dec, char, binary, or octal"
+                },
+                "struct": {
+                  "type": "string",
+                  "description": "Struct name for kind=stroff"
+                },
+                "delta": {
+                  "type": "integer",
+                  "description": "Struct offset delta for kind=stroff"
+                },
+                "target_addr": {
+                  "type": "string",
+                  "description": "Optional target address for kind=offset"
+                }
+              },
+              "required": [],
+              "additionalProperties": false
+            }
+          ],
+          "description": "Operand-typing operation or operations"
+        }
+      },
+      "required": [
+        "items"
+      ]
+    },
+    "outputSchema": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "addr": {
+            "type": "string"
+          },
+          "op_n": {
+            "type": "integer"
+          },
+          "kind": {
+            "type": "string"
+          },
+          "ok": {
+            "type": "boolean"
+          },
+          "error": {
+            "type": "string"
+          }
+        },
+        "required": [],
+        "additionalProperties": false
+      }
+    }
+  },
+  {
+    "name": "make_data",
+    "description": "Create a typed data symbol at an address, replacing prior items by default.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "items": {
+          "anyOf": [
+            {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "addr": {
+                    "type": "string",
+                    "description": "Address to define as typed data"
+                  },
+                  "type": {
+                    "type": "string",
+                    "description": "Full C declaration, e.g. 'int value'"
+                  },
+                  "name": {
+                    "type": "string",
+                    "description": "Optional symbol name"
+                  },
+                  "delete_existing": {
+                    "type": "boolean",
+                    "description": "Delete existing items across the inferred type size first"
+                  }
+                },
+                "required": [],
+                "additionalProperties": false
+              }
+            },
+            {
+              "type": "object",
+              "properties": {
+                "addr": {
+                  "type": "string",
+                  "description": "Address to define as typed data"
+                },
+                "type": {
+                  "type": "string",
+                  "description": "Full C declaration, e.g. 'int value'"
+                },
+                "name": {
+                  "type": "string",
+                  "description": "Optional symbol name"
+                },
+                "delete_existing": {
+                  "type": "boolean",
+                  "description": "Delete existing items across the inferred type size first"
+                }
+              },
+              "required": [],
+              "additionalProperties": false
+            }
+          ],
+          "description": "Typed data creation operation or operations"
+        }
+      },
+      "required": [
+        "items"
+      ]
+    },
+    "outputSchema": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "addr": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "type": {
+            "type": "string"
+          },
+          "size": {
+            "type": "integer"
+          },
+          "ok": {
+            "type": "boolean"
           },
           "error": {
             "type": "string"
@@ -3597,7 +3915,11 @@
         },
         "start": {
           "type": "string",
-          "description": "Cursor address to resume from"
+          "description": "Lower bound or cursor address to resume from"
+        },
+        "end": {
+          "type": "string",
+          "description": "Upper bound address, exclusive"
         },
         "regex": {
           "type": "boolean",

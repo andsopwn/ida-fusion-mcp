@@ -30,6 +30,10 @@ def register_instance(pid: int, port: int, idb_path: str, **metadata) -> str:
 
     from ida_fusion_mcp.registry import InstanceRegistry, get_default_registry_path
 
+    metadata.setdefault("type", "gui")
+    metadata.setdefault("backend", "ida-gui")
+    metadata.setdefault("owned", False)
+    metadata.setdefault("adopted", False)
     registry = InstanceRegistry(get_default_registry_path())
     instance_id = registry.register(pid, port, idb_path, **metadata)
 

@@ -3,6 +3,7 @@ import queue
 import functools
 import os
 import sys
+import threading
 import time
 from enum import IntEnum
 import idaapi
@@ -39,6 +40,12 @@ class CancelledError(RequestCancelledError):
 logger = logging.getLogger(__name__)
 _TOOL_TIMEOUT_ENV = "IDA_MCP_TOOL_TIMEOUT_SEC"
 _DEFAULT_TOOL_TIMEOUT_SEC = 15.0
+_deadline_state = threading.local()
+
+
+def get_tool_deadline() -> float | None:
+    """Return the monotonic deadline for the current synchronized tool call."""
+    return getattr(_deadline_state, "deadline", None)
 
 
 def _get_tool_timeout_seconds() -> float:
@@ -104,6 +111,11 @@ def sync_wrapper(ff, timeout_override: float | None = None):
                 # Calculate deadline when execution starts on IDA main thread,
                 # not when the request was queued (avoids stale deadlines)
                 deadline = time.monotonic() + timeout if timeout > 0 else None
+                _deadline_state.deadline = deadline
+                try:
+                    ida_kernwin.clr_cancelled()
+                except Exception:
+                    pass
 
                 def profilefunc(frame, event, arg):
                     # Check cancellation first (higher priority)
@@ -118,6 +130,11 @@ def sync_wrapper(ff, timeout_override: float | None = None):
                     return ff()
                 finally:
                     sys.setprofile(old_profile)
+                    try:
+                        ida_kernwin.clr_cancelled()
+                    except Exception:
+                        pass
+                    _deadline_state.deadline = None
 
             timed_ff.__name__ = ff.__name__
             return _sync_wrapper(timed_ff)

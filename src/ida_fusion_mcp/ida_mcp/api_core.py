@@ -8,9 +8,9 @@ import ida_auto
 import ida_bytes
 import ida_funcs
 import ida_hexrays
+import ida_kernwin
 import ida_lines
 import ida_loader
-import ida_search
 import idaapi
 import idautils
 import ida_nalt
@@ -19,7 +19,7 @@ import ida_segment
 import idc
 
 from .rpc import tool
-from .sync import idasync, tool_timeout
+from .sync import idasync, tool_timeout, get_tool_deadline
 
 # Cached strings list: [(ea, text), ...]
 _strings_cache: list[tuple[int, str]] | None = None
@@ -921,13 +921,19 @@ def _all_segments() -> list[tuple[int, int]]:
 def search_text(
     pattern: Annotated[str, "Text to search for in the rendered listing"],
     limit: Annotated[int, "Max hits per page (default: 30, max: 500)"] = 30,
-    start: Annotated[str, "Cursor: address to resume from. Empty = first segment."] = "",
+    start: Annotated[str, "Lower bound or cursor address. Empty = first segment."] = "",
+    end: Annotated[str, "Upper bound (exclusive). Empty = last segment."] = "",
     regex: Annotated[bool, "Treat pattern as a regex"] = False,
     case_sensitive: Annotated[bool, "Case-sensitive match"] = False,
     include: Annotated[str, "'disasm' | 'comments' | 'all'"] = "all",
     code_only: Annotated[bool, "Restrict search to executable segments"] = True,
 ) -> dict:
-    """Search rendered listing text using IDA's native text search."""
+    """Search rendered listing text over [start, end).
+
+    This walks IDA heads in bounded chunks instead of calling
+    ida_search.find_text(), which can block inside a large segment without
+    yielding to timeout or cancel handling.
+    """
     if limit <= 0:
         limit = 30
     if limit > 500:
@@ -955,68 +961,81 @@ def search_text(
             needle = pattern.lower()
             matcher = lambda s: needle in s.lower()
 
-    sflag = ida_search.SEARCH_DOWN | ida_search.SEARCH_NOSHOW
-    if case_sensitive:
-        sflag |= ida_search.SEARCH_CASE
-    if regex:
-        sflag |= ida_search.SEARCH_REGEX
-
     segments = _exec_segments() if code_only else _all_segments()
     if not segments:
         return {"n": 0, "hits": [], "cursor": {"done": True}}
 
     if start:
         try:
-            cursor_ea = parse_address(start)
+            start_ea = parse_address(start)
         except Exception as e:
             return {"n": 0, "hits": [], "cursor": {"done": True}, "error": f"invalid start: {e}"}
     else:
-        cursor_ea = segments[0][0]
+        start_ea = segments[0][0]
+
+    if end:
+        try:
+            end_ea = parse_address(end)
+        except Exception as e:
+            return {"n": 0, "hits": [], "cursor": {"done": True}, "error": f"invalid end: {e}"}
+    else:
+        end_ea = segments[-1][1]
+
+    if end_ea <= start_ea:
+        return {"n": 0, "hits": [], "cursor": {"done": True}}
 
     hits: list[dict] = []
     next_cursor: int | None = None
-    seg_idx = 0
-    while seg_idx < len(segments) and segments[seg_idx][1] <= cursor_ea:
-        seg_idx += 1
-    if seg_idx < len(segments) and cursor_ea < segments[seg_idx][0]:
-        cursor_ea = segments[seg_idx][0]
+    cancelled = False
+    chunk_bytes = 65536
+    deadline = get_tool_deadline()
 
-    while seg_idx < len(segments) and len(hits) < limit:
-        seg_start, seg_end = segments[seg_idx]
-        ea = ida_search.find_text(cursor_ea, 0, 0, pattern, sflag)
-        if ea == idaapi.BADADDR or ea >= seg_end:
-            seg_idx += 1
-            if seg_idx < len(segments):
-                cursor_ea = segments[seg_idx][0]
+    for seg_start, seg_end in segments:
+        if cancelled or len(hits) >= limit:
+            break
+        if seg_end <= start_ea:
             continue
-        if ea < seg_start:
-            cursor_ea = ea + 1
-            continue
-
-        lines = _classify_hit_lines(ea, matcher, want_disasm, want_comments)
-        if lines:
-            entry = {"addr": hex(ea), "matches": lines}
-            func = idaapi.get_func(ea)
-            if func is not None:
-                fname = ida_funcs.get_func_name(func.start_ea)
-                if fname:
-                    entry["function"] = fname
-            seg = idaapi.getseg(ea)
-            if seg is not None:
-                sname = ida_segment.get_segm_name(seg)
-                if sname:
-                    entry["segment"] = sname
-            hits.append(entry)
-            if len(hits) >= limit:
-                size = max(1, idaapi.get_item_size(ea))
-                next_cursor = ea + size
+        if seg_start >= end_ea:
+            break
+        walk_start = max(seg_start, start_ea)
+        walk_end = min(seg_end, end_ea)
+        chunk_ea = walk_start
+        while chunk_ea < walk_end:
+            if cancelled or len(hits) >= limit:
                 break
-
-        size = idaapi.get_item_size(ea)
-        cursor_ea = ea + (size if size > 0 else 1)
+            if (
+                deadline is not None and time.monotonic() >= deadline
+            ) or ida_kernwin.user_cancelled():
+                cancelled = True
+                next_cursor = chunk_ea
+                break
+            chunk_end = min(chunk_ea + chunk_bytes, walk_end)
+            for head_ea in idautils.Heads(chunk_ea, chunk_end):
+                lines = _classify_hit_lines(head_ea, matcher, want_disasm, want_comments)
+                if not lines:
+                    continue
+                entry = {"addr": hex(head_ea), "matches": lines}
+                func = idaapi.get_func(head_ea)
+                if func is not None:
+                    fname = ida_funcs.get_func_name(func.start_ea)
+                    if fname:
+                        entry["function"] = fname
+                seg = idaapi.getseg(head_ea)
+                if seg is not None:
+                    sname = ida_segment.get_segm_name(seg)
+                    if sname:
+                        entry["segment"] = sname
+                hits.append(entry)
+                if len(hits) >= limit:
+                    size = max(1, idaapi.get_item_size(head_ea))
+                    next_cursor = head_ea + size
+                    break
+            chunk_ea = chunk_end
 
     cursor: dict[str, Any]
-    if next_cursor is not None:
+    if cancelled:
+        cursor = {"next": hex(next_cursor) if next_cursor is not None else "", "cancelled": True}
+    elif next_cursor is not None:
         cursor = {"next": hex(next_cursor)}
     else:
         cursor = {"done": True}

@@ -26,6 +26,22 @@ def _get_manager() -> IdalibManager:
     return _manager
 
 
+def _bool_arg(arguments: dict, name: str, default: bool) -> bool:
+    value = arguments.get(name, default)
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().lower() not in {"0", "false", "no", "off"}
+    return bool(value)
+
+
+def _optional_int_arg(arguments: dict, name: str) -> int | None:
+    value = arguments.get(name)
+    if value is None or value == "":
+        return None
+    return int(value)
+
+
 # ------------------------------------------------------------------
 # Tool functions (called from custom_tools_call in server.py)
 # ------------------------------------------------------------------
@@ -39,14 +55,36 @@ def idalib_open(arguments: dict) -> dict:
     Optional args:
         timeout (int): Seconds to wait for analysis (default 120).
         unsafe (bool): Enable unsafe tools (default false).
+        mode (str): prefer_headless|force_headless|prefer_gui|force_gui.
+        preferred_instance_id (str): Reuse this registry instance if reachable.
+        idle_ttl_sec (int): Stop owned headless worker after idle seconds.
+        run_auto_analysis (bool): Run/wait for auto-analysis in headless worker.
+        build_caches (bool): Build startup caches in headless worker.
+        init_hexrays (bool): Initialize Hex-Rays in headless worker.
     """
     mgr = _get_manager()
     input_path = arguments.get("input_path", "")
     if not input_path:
         return {"error": "Missing required argument 'input_path'"}
     timeout = int(arguments.get("timeout", 120))
-    unsafe = bool(arguments.get("unsafe", False))
-    return mgr.spawn_session(input_path, timeout=timeout, unsafe=unsafe)
+    unsafe = _bool_arg(arguments, "unsafe", False)
+    mode = str(arguments.get("mode", "prefer_headless") or "prefer_headless")
+    preferred_instance_id = arguments.get("preferred_instance_id") or None
+    idle_ttl_sec = _optional_int_arg(arguments, "idle_ttl_sec")
+    run_auto_analysis = _bool_arg(arguments, "run_auto_analysis", True)
+    build_caches = _bool_arg(arguments, "build_caches", True)
+    init_hexrays = _bool_arg(arguments, "init_hexrays", True)
+    return mgr.spawn_session(
+        input_path,
+        timeout=timeout,
+        unsafe=unsafe,
+        mode=mode,
+        preferred_instance_id=preferred_instance_id,
+        idle_ttl_sec=idle_ttl_sec,
+        run_auto_analysis=run_auto_analysis,
+        build_caches=build_caches,
+        init_hexrays=init_hexrays,
+    )
 
 
 def idalib_close(arguments: dict) -> dict:
@@ -90,11 +128,11 @@ IDALIB_TOOL_SCHEMAS: list[dict] = [
     {
         "name": "idalib_open",
         "description": (
-            "Open a binary in a new headless idalib session. "
-            "Spawns a background process that loads the binary via idalib, "
-            "waits for auto-analysis to complete, then registers as a regular "
-            "IDA instance. Use list_instances() to see it alongside GUI instances. "
-            "Requires idapro Python package on the configured Python."
+            "Open a binary through the router-native IDA registry. "
+            "By default this starts or reuses a headless idalib worker, but "
+            "mode='prefer_gui'/'force_gui' can reuse an already registered GUI "
+            "IDA instance for the same binary. Use list_instances() to see the "
+            "resulting instance_id. Requires idapro Python package for headless mode."
         ),
         "inputSchema": {
             "type": "object",
@@ -110,6 +148,31 @@ IDALIB_TOOL_SCHEMAS: list[dict] = [
                 "unsafe": {
                     "type": "boolean",
                     "description": "Enable unsafe/destructive tools (default false)",
+                },
+                "mode": {
+                    "type": "string",
+                    "enum": ["prefer_headless", "force_headless", "prefer_gui", "force_gui"],
+                    "description": "Routing mode. force_gui never launches headless; prefer_gui falls back to headless.",
+                },
+                "preferred_instance_id": {
+                    "type": "string",
+                    "description": "Reuse this registry instance if it is reachable and compatible with mode.",
+                },
+                "idle_ttl_sec": {
+                    "type": "integer",
+                    "description": "Owned headless worker exits after this many idle seconds (0/omitted disables).",
+                },
+                "run_auto_analysis": {
+                    "type": "boolean",
+                    "description": "Run and wait for auto-analysis in the headless worker (default true)",
+                },
+                "build_caches": {
+                    "type": "boolean",
+                    "description": "Build strings/functions/globals caches during headless startup (default true)",
+                },
+                "init_hexrays": {
+                    "type": "boolean",
+                    "description": "Initialize Hex-Rays in the headless worker during startup (default true)",
                 },
             },
             "required": ["input_path"],

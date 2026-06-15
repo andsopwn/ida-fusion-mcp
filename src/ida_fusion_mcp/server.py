@@ -531,6 +531,11 @@ class IdaFusionMcpServer:
                                 "host": {"type": "string"},
                                 "port": {"type": "integer"},
                                 "pid": {"type": "integer"},
+                                "backend": {"type": "string"},
+                                "owned": {"type": "boolean"},
+                                "adopted": {"type": "boolean"},
+                                "worker_pid": {"type": ["integer", "null"]},
+                                "idle_ttl_sec": {"type": ["integer", "null"]},
                                 "registered_at": {"type": "string"}
                             },
                             "required": ["id", "type", "binary_name", "binary_path", "arch", "host", "port", "pid", "registered_at"]
@@ -632,11 +637,11 @@ class IdaFusionMcpServer:
             }
         }
 
-        # Register idalib management tool schemas (only if IDA Pro with idalib is available)
-        from .idalib_manager import is_idalib_available
-        if is_idalib_available():
-            for schema in idalib_tools.IDALIB_TOOL_SCHEMAS:
-                self._tool_cache[schema["name"]] = schema.copy()
+        # Register idalib management schemas unconditionally. GUI reuse modes do
+        # not need idalib, and headless mode reports a runtime error if idalib
+        # is unavailable.
+        for schema in idalib_tools.IDALIB_TOOL_SCHEMAS:
+            self._tool_cache[schema["name"]] = schema.copy()
 
         _SINGLE_THREAD_WARNING = (
             " WARNING: IDA executes on a single main thread. "
@@ -833,4 +838,3 @@ def serve(registry_path: str | None = None, idalib_python: str | None = None):
     """
     server = IdaFusionMcpServer(registry_path, idalib_python=idalib_python)
     server.run()
-
