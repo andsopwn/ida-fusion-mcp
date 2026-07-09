@@ -9,9 +9,11 @@ from __future__ import annotations
 
 import atexit
 import os
+import secrets
 import socket
 import subprocess
 import sys
+import threading
 import time
 from typing import TYPE_CHECKING, Any
 
@@ -24,6 +26,8 @@ if TYPE_CHECKING:
 _READY_TIMEOUT = 120
 # Poll interval while waiting for worker readiness.
 _READY_POLL_INTERVAL = 0.5
+_STDERR_TAIL_BYTES = 8192
+_KILL_WAIT_TIMEOUT = 5
 
 # idalib library file name per platform.
 _IDALIB_NAMES = {
@@ -33,6 +37,58 @@ _IDALIB_NAMES = {
 }
 _DEFAULT_MAX_OWNED_WORKERS = 4
 _OPEN_MODES = frozenset({"prefer_headless", "force_headless", "prefer_gui", "force_gui"})
+
+
+class _StderrDrainer:
+    """Continuously drain a worker's stderr into a bounded in-memory tail."""
+
+    def __init__(self, stream: Any, limit: int = _STDERR_TAIL_BYTES):
+        self._stream = stream
+        self._limit = limit
+        self._tail = bytearray()
+        self._lock = threading.Lock()
+        self._thread: threading.Thread | None = None
+        if stream is not None:
+            self._thread = threading.Thread(
+                target=self._drain,
+                name="idalib-stderr-drainer",
+                daemon=True,
+            )
+            self._thread.start()
+
+    def _drain(self) -> None:
+        while True:
+            try:
+                chunk = self._stream.read(4096)
+            except Exception:
+                return
+            if not chunk:
+                return
+            if isinstance(chunk, str):
+                chunk = chunk.encode(errors="replace")
+            elif not isinstance(chunk, (bytes, bytearray)):
+                return
+            with self._lock:
+                self._tail.extend(chunk)
+                if len(self._tail) > self._limit:
+                    del self._tail[:-self._limit]
+
+    def tail(self) -> str:
+        with self._lock:
+            data = bytes(self._tail)
+        return data.decode(errors="replace")
+
+    def finish(self, timeout: float = 1.0) -> None:
+        thread = self._thread
+        if thread is None:
+            return
+        thread.join(timeout)
+        try:
+            self._stream.close()
+        except Exception:
+            pass
+        if thread.is_alive():
+            thread.join(timeout)
 
 
 def is_idalib_available() -> bool:
@@ -128,6 +184,14 @@ class IdalibManager:
         self.python_executable = python_executable or sys.executable
         # instance_id -> subprocess.Popen
         self._processes: dict[str, subprocess.Popen] = {}
+        # instance_id -> bounded stderr drainer
+        self._stderr_drainers: dict[str, _StderrDrainer] = {}
+        # Local cleanup IDs for workers that could not be registered or stopped.
+        self._unregistered_sessions: set[str] = set()
+        # Registry reconciliation metadata retained for cleanup IDs whose
+        # registration state was unknown or ambiguous.
+        self._pending_registry_contexts: dict[str, dict[str, Any]] = {}
+        self._cleanup_sequence = 0
         # Register cleanup on interpreter shutdown
         atexit.register(self.close_all_sessions)
 
@@ -200,6 +264,11 @@ class IdalibManager:
                 )
             }
 
+        try:
+            ownership_nonce = secrets.token_hex(16)
+        except Exception as exc:
+            return {"error": f"Failed to initialize worker ownership nonce: {exc}"}
+
         port = _find_free_port(host)
 
         cmd = [
@@ -227,7 +296,7 @@ class IdalibManager:
         try:
             proc = subprocess.Popen(
                 cmd,
-                stdout=subprocess.PIPE,
+                stdout=subprocess.DEVNULL,
                 stderr=subprocess.PIPE,
                 creationflags=creation_flags,
             )
@@ -241,59 +310,182 @@ class IdalibManager:
         except Exception as exc:
             return {"error": f"Failed to spawn idalib worker: {exc}"}
 
-        # Wait for the worker to become ready.
-        if not self._wait_for_ready(host, port, proc, timeout):
-            # Worker didn't come up — collect stderr for diagnostics.
-            stderr_text = ""
+        try:
+            stderr_drainer = _StderrDrainer(getattr(proc, "stderr", None))
+        except Exception as exc:
+            self._close_stderr_stream(proc)
+            return_code = self._stop_process(proc, terminate_timeout=5)
+            return self._failed_start_result(
+                proc=proc,
+                drainer=None,
+                return_code=return_code,
+                error=f"Failed to initialize idalib worker diagnostics: {exc}",
+            )
+
+        # From this point onward every exceptional path must either confirm
+        # process death or retain the process and drainer for a close retry.
+        try:
+            ready = self._wait_for_ready(host, port, proc, timeout)
+        except Exception as exc:
+            return_code = self._stop_process(proc, terminate_timeout=5)
+            return self._failed_start_result(
+                proc=proc,
+                drainer=stderr_drainer,
+                return_code=return_code,
+                error=f"Failed while waiting for idalib worker readiness: {exc}",
+            )
+
+        if not ready:
             try:
-                proc.terminate()
-                _, stderr_bytes = proc.communicate(timeout=5)
-                stderr_text = stderr_bytes.decode(errors="replace")[-500:]
+                initial_return_code = proc.poll()
             except Exception:
-                proc.kill()
-            return {
-                "error": (
-                    f"idalib worker did not become ready within {timeout}s. "
-                    f"Last stderr: {stderr_text}"
-                )
-            }
+                initial_return_code = None
+            final_return_code = self._stop_process(proc, terminate_timeout=5)
+            return_code = (
+                initial_return_code
+                if initial_return_code is not None
+                else final_return_code
+            )
+            stop_confirmed = self._process_stop_confirmed(proc, return_code)
+            if stop_confirmed:
+                stderr_drainer.finish()
+            stderr_text = stderr_drainer.tail().strip() or "<no stderr output>"
+            if initial_return_code is not None:
+                reason = "exited before becoming ready"
+            else:
+                reason = f"did not become ready within {timeout}s"
+            error = (
+                f"idalib worker {reason} (return code {return_code}). "
+                f"Last stderr: {stderr_text}"
+            )
+            if stop_confirmed:
+                return {
+                    "error": error,
+                    "pid": proc.pid,
+                    "managed": False,
+                    "registered": False,
+                }
+            return self._failed_start_result(
+                proc=proc,
+                drainer=stderr_drainer,
+                return_code=return_code,
+                error=error,
+            )
 
         # Ask the worker for its canonical module name so the registry matches
         # what the metadata resource reports. Falls back to basename when the
         # input was an IDB (e.g. foo.exe.i64 → module is "foo.exe") or query fails.
-        metadata = query_binary_metadata(host, port, timeout=5.0)
-        module_name = (metadata or {}).get("module") if metadata else None
-        binary_name = module_name or os.path.basename(resolved_path)
-        instance_id = self.registry.register(
-            pid=proc.pid,
-            port=port,
-            idb_path=resolved_path,
-            host=host,
-            binary_name=binary_name,
-            binary_path=resolved_path,
-            type="idalib",
-            backend="headless",
-            owned=True,
-            adopted=False,
-            worker_pid=proc.pid,
-            input_path=resolved_path,
-            idle_ttl_sec=idle_ttl_sec,
-            run_auto_analysis=run_auto_analysis,
-            build_caches=build_caches,
-            init_hexrays=init_hexrays,
+        warnings: list[str] = []
+        try:
+            metadata = query_binary_metadata(host, port, timeout=5.0)
+        except Exception as exc:
+            # Metadata is advisory. Keep the ready worker under normal manager
+            # ownership and use the documented basename fallback.
+            metadata = None
+            warnings.append(
+                f"Worker metadata query failed; using input basename: {exc}"
+            )
+        module_value = metadata.get("module") if isinstance(metadata, dict) else None
+        module_name = (
+            module_value
+            if isinstance(module_value, str) and module_value.strip()
+            else None
         )
+        binary_name = module_name or os.path.basename(resolved_path)
+        try:
+            instance_id = self.registry.register(
+                pid=proc.pid,
+                port=port,
+                idb_path=resolved_path,
+                host=host,
+                binary_name=binary_name,
+                binary_path=resolved_path,
+                type="idalib",
+                backend="headless",
+                owned=True,
+                adopted=False,
+                worker_pid=proc.pid,
+                input_path=resolved_path,
+                idle_ttl_sec=idle_ttl_sec,
+                run_auto_analysis=run_auto_analysis,
+                build_caches=build_caches,
+                init_hexrays=init_hexrays,
+                _manager_nonce=ownership_nonce,
+            )
+        except Exception as exc:
+            registration_error = str(exc).replace(ownership_nonce, "<redacted>")
+            (
+                reconciled_id,
+                reconciled_info,
+                registry_state,
+                reconciliation_detail,
+            ) = self._reconcile_registration(
+                pid=proc.pid,
+                host=host,
+                port=port,
+                input_path=resolved_path,
+                ownership_nonce=ownership_nonce,
+            )
+            if reconciled_id is not None and reconciled_info is not None:
+                self._processes[reconciled_id] = proc
+                self._stderr_drainers[reconciled_id] = stderr_drainer
+                warnings.append(
+                    "Registry entry committed despite register() raising; "
+                    f"ownership reconciled under '{reconciled_id}': {registration_error}"
+                )
+                reconciled_binary = reconciled_info.get("binary_name")
+                if not isinstance(reconciled_binary, str) or not reconciled_binary.strip():
+                    reconciled_binary = binary_name
+                return self._owned_worker_result(
+                    instance_id=reconciled_id,
+                    host=host,
+                    port=port,
+                    pid=proc.pid,
+                    binary_name=reconciled_binary,
+                    registry_reconciled=True,
+                    warnings=warnings,
+                )
+
+            return_code = self._stop_process(proc, terminate_timeout=5)
+            return self._failed_start_result(
+                proc=proc,
+                drainer=stderr_drainer,
+                return_code=return_code,
+                error=(
+                    f"Failed to register idalib worker: {registration_error}. "
+                    f"Registry reconciliation state: {registry_state}"
+                    + (
+                        f" ({reconciliation_detail})"
+                        if reconciliation_detail
+                        else ""
+                    )
+                ),
+                registered=False if registry_state == "absent" else None,
+                registry_state=registry_state,
+                registry_context=(
+                    {
+                        "pid": proc.pid,
+                        "host": host,
+                        "port": port,
+                        "input_path": resolved_path,
+                        "ownership_nonce": ownership_nonce,
+                    }
+                    if registry_state in {"unknown", "ambiguous"}
+                    else None
+                ),
+            )
 
         self._processes[instance_id] = proc
-        return {
-            "instance_id": instance_id,
-            "host": host,
-            "port": port,
-            "pid": proc.pid,
-            "binary": binary_name,
-            "backend": "headless",
-            "owned": True,
-            "adopted": False,
-        }
+        self._stderr_drainers[instance_id] = stderr_drainer
+        return self._owned_worker_result(
+            instance_id=instance_id,
+            host=host,
+            port=port,
+            pid=proc.pid,
+            binary_name=binary_name,
+            registry_reconciled=False,
+            warnings=warnings,
+        )
 
     def close_session(self, instance_id: str) -> dict:
         """Terminate the worker for *instance_id* and unregister it.
@@ -301,35 +493,150 @@ class IdalibManager:
         Returns ``{"ok": True}`` on success or ``{"error": ...}`` on failure.
         """
         proc = self._processes.get(instance_id)
+        if proc is None and instance_id in self._pending_registry_contexts:
+            return self._cleanup_pending_registry(
+                instance_id,
+                process_stopped=True,
+            )
+        local_only = instance_id in self._unregistered_sessions
         if proc is None:
-            # Not managed by us (might be GUI or already closed).
             info = self.registry.get_instance(instance_id)
             if info is not None and info.get("type") == "idalib":
-                # Orphaned idalib entry — clean it up from registry.
-                self.registry.unregister(instance_id)
-                return {"ok": True, "note": "orphaned entry removed"}
+                pid = info.get("worker_pid") or info.get("pid")
+                if isinstance(pid, int) and not isinstance(pid, bool) and pid > 0:
+                    try:
+                        alive = is_process_alive(pid)
+                    except Exception:
+                        alive = None
+                    if alive is False:
+                        try:
+                            self.registry.unregister(instance_id)
+                        except Exception as exc:
+                            return {
+                                "ok": False,
+                                "error": f"Worker was already dead, but registry cleanup failed: {exc}",
+                                "instance_id": instance_id,
+                                "pid": pid,
+                                "managed": False,
+                                "process_stopped": True,
+                                "registry_cleaned": False,
+                            }
+                        return {
+                            "ok": True,
+                            "note": "stale registry entry removed; worker was already dead",
+                            "instance_id": instance_id,
+                            "pid": pid,
+                            "managed": False,
+                        }
+                return {
+                    "error": (
+                        f"Instance '{instance_id}' is registered as idalib but is not "
+                        "owned by this router process; it was not terminated or unregistered."
+                    ),
+                    "instance_id": instance_id,
+                    "pid": pid,
+                    "managed": False,
+                    "hint": (
+                        "Close it from the router process that opened it, or terminate "
+                        "the verified worker process manually."
+                    ),
+                }
             return {"error": f"Instance '{instance_id}' is not a managed idalib session"}
 
-        # Terminate the subprocess.
+        return_code = self._stop_process(proc, terminate_timeout=10)
+        if return_code is None:
+            try:
+                alive = is_process_alive(proc.pid)
+            except Exception:
+                alive = None
+            if alive is not False:
+                if local_only:
+                    error = (
+                        f"Termination of local cleanup worker '{instance_id}' could not "
+                        "be confirmed; it remains managed for a later retry."
+                    )
+                else:
+                    error = (
+                        f"Termination of managed worker '{instance_id}' could not be "
+                        "confirmed; the session remains registered."
+                    )
+                return {
+                    "error": error,
+                    "instance_id": instance_id,
+                    "pid": proc.pid,
+                    "managed": True,
+                    "registered": (
+                        None
+                        if instance_id in self._pending_registry_contexts
+                        else not local_only
+                    ),
+                    **(
+                        {
+                            "registry_state": self._pending_registry_contexts[
+                                instance_id
+                            ].get("state", "unknown")
+                        }
+                        if instance_id in self._pending_registry_contexts
+                        else {}
+                    ),
+                    "hint": "Resolve the process termination failure, then retry idalib_close.",
+                }
+        self._processes.pop(instance_id, None)
+        self._finish_drainer(instance_id, proc)
+        if local_only:
+            if instance_id in self._pending_registry_contexts:
+                return self._cleanup_pending_registry(
+                    instance_id,
+                    process_stopped=True,
+                )
+            self._unregistered_sessions.discard(instance_id)
+            return {
+                "ok": True,
+                "instance_id": instance_id,
+                "managed": False,
+                "registered": False,
+                "process_stopped": True,
+                "registry_cleaned": True,
+                "note": "unregistered worker stopped and local cleanup state removed",
+            }
         try:
-            proc.terminate()
-            proc.wait(timeout=10)
-        except subprocess.TimeoutExpired:
-            proc.kill()
-            proc.wait(timeout=5)
-        except Exception:
-            proc.kill()
-
-        del self._processes[instance_id]
-        self.registry.unregister(instance_id)
-        return {"ok": True}
+            self.registry.unregister(instance_id)
+        except Exception as exc:
+            return {
+                "ok": False,
+                "error": f"Worker stopped, but registry cleanup failed: {exc}",
+                "instance_id": instance_id,
+                "pid": proc.pid,
+                "managed": False,
+                "process_stopped": True,
+                "registry_cleaned": False,
+            }
+        return {
+            "ok": True,
+            "process_stopped": True,
+            "registry_cleaned": True,
+        }
 
     def close_all_sessions(self) -> int:
         """Terminate all managed idalib workers. Returns count closed."""
-        ids = list(self._processes.keys())
+        ids = list(
+            dict.fromkeys(
+                [*self._processes.keys(), *self._pending_registry_contexts.keys()]
+            )
+        )
+        closed = 0
         for iid in ids:
-            self.close_session(iid)
-        return len(ids)
+            had_process = iid in self._processes
+            try:
+                result = self.close_session(iid)
+            except Exception:
+                continue
+            if had_process and (
+                result.get("ok") is True
+                or result.get("process_stopped") is True
+            ):
+                closed += 1
+        return closed
 
     def list_sessions(self) -> list[dict]:
         """Return info about all managed idalib sessions."""
@@ -340,16 +647,40 @@ class IdalibManager:
             if not alive:
                 # Clean up dead workers.
                 del self._processes[iid]
-                self.registry.unregister(iid)
+                self._finish_drainer(iid, proc)
+                local_only = iid in self._unregistered_sessions
+                if local_only and iid in self._pending_registry_contexts:
+                    self._cleanup_pending_registry(iid, process_stopped=True)
+                elif local_only:
+                    self._unregistered_sessions.discard(iid)
+                else:
+                    self._unregister_error(iid)
                 continue
+            pending = self._pending_registry_contexts.get(iid)
             result.append({
                 "instance_id": iid,
                 "pid": proc.pid,
-                "host": info.get("host", "127.0.0.1") if info else "127.0.0.1",
-                "port": info.get("port", 0) if info else 0,
+                "host": (
+                    pending.get("host", "127.0.0.1")
+                    if pending
+                    else info.get("host", "127.0.0.1") if info else "127.0.0.1"
+                ),
+                "port": (
+                    pending.get("port", 0)
+                    if pending
+                    else info.get("port", 0) if info else 0
+                ),
                 "binary_name": info.get("binary_name", "unknown") if info else "unknown",
                 "binary_path": info.get("binary_path", "") if info else "",
                 "type": "idalib",
+                **(
+                    {
+                        "registered": None,
+                        "registry_state": pending.get("state", "unknown"),
+                    }
+                    if pending
+                    else {}
+                ),
             })
         return result
 
@@ -357,22 +688,67 @@ class IdalibManager:
         """Health / readiness check for a specific idalib session."""
         proc = self._processes.get(instance_id)
         if proc is None:
+            pending = self._pending_registry_contexts.get(instance_id)
+            if pending is not None:
+                return {
+                    "instance_id": instance_id,
+                    "pid": pending["pid"],
+                    "alive": False,
+                    "reachable": False,
+                    "managed": False,
+                    "registered": None,
+                    "registry_state": pending.get("state", "unknown"),
+                    "hint": f"Retry idalib_close with instance_id '{instance_id}'.",
+                }
             return {"error": f"Instance '{instance_id}' is not a managed idalib session"}
 
         info = self.registry.get_instance(instance_id)
         alive = is_process_alive(proc.pid)
         if not alive:
             del self._processes[instance_id]
-            self.registry.unregister(instance_id)
-            return {
+            self._finish_drainer(instance_id, proc)
+            local_only = instance_id in self._unregistered_sessions
+            registry_cleanup_error = None
+            pending_cleanup = None
+            if local_only and instance_id in self._pending_registry_contexts:
+                pending_cleanup = self._cleanup_pending_registry(
+                    instance_id,
+                    process_stopped=True,
+                )
+            elif local_only:
+                self._unregistered_sessions.discard(instance_id)
+            else:
+                registry_cleanup_error = self._unregister_error(instance_id)
+            result = {
                 "instance_id": instance_id,
                 "alive": False,
                 "reachable": False,
                 "error": "Worker process is dead",
             }
+            if registry_cleanup_error is not None:
+                result["registry_cleanup_error"] = registry_cleanup_error
+            if pending_cleanup is not None:
+                for key in (
+                    "registered",
+                    "registry_state",
+                    "registry_cleaned",
+                    "registry_instance_id",
+                ):
+                    if key in pending_cleanup:
+                        result[key] = pending_cleanup[key]
+            return result
 
-        host = info.get("host", "127.0.0.1") if info else "127.0.0.1"
-        port = info.get("port", 0) if info else 0
+        pending = self._pending_registry_contexts.get(instance_id)
+        host = (
+            pending.get("host", "127.0.0.1")
+            if pending
+            else info.get("host", "127.0.0.1") if info else "127.0.0.1"
+        )
+        port = (
+            pending.get("port", 0)
+            if pending
+            else info.get("port", 0) if info else 0
+        )
         reachable = ping_instance(host, port, timeout=5.0)
 
         return {
@@ -381,6 +757,14 @@ class IdalibManager:
             "alive": True,
             "reachable": reachable,
             "binary_name": info.get("binary_name", "unknown") if info else "unknown",
+            **(
+                {
+                    "registered": None,
+                    "registry_state": pending.get("state", "unknown"),
+                }
+                if pending
+                else {}
+            ),
         }
 
     # ------------------------------------------------------------------
@@ -394,7 +778,14 @@ class IdalibManager:
                 pids.add(proc.pid)
                 continue
             del self._processes[iid]
-            self.registry.unregister(iid)
+            self._finish_drainer(iid, proc)
+            local_only = iid in self._unregistered_sessions
+            if local_only and iid in self._pending_registry_contexts:
+                self._cleanup_pending_registry(iid, process_stopped=True)
+            elif local_only:
+                self._unregistered_sessions.discard(iid)
+            else:
+                self._unregister_error(iid)
         for info in self.registry.list_instances().values():
             if info.get("type") != "idalib" or not info.get("owned", False):
                 continue
@@ -404,6 +795,334 @@ class IdalibManager:
             if is_process_alive(pid):
                 pids.add(pid)
         return len(pids)
+
+    @staticmethod
+    def _process_stop_confirmed(proc: subprocess.Popen, return_code: int | None) -> bool:
+        if return_code is not None:
+            return True
+        try:
+            return not is_process_alive(proc.pid)
+        except Exception:
+            return False
+
+    def _unregister_error(self, instance_id: str) -> str | None:
+        try:
+            self.registry.unregister(instance_id)
+            return None
+        except Exception as exc:
+            return str(exc)
+
+    @staticmethod
+    def _close_stderr_stream(proc: subprocess.Popen) -> None:
+        stream = getattr(proc, "stderr", None)
+        if stream is not None:
+            try:
+                stream.close()
+            except Exception:
+                pass
+
+    def _track_unregistered_worker(
+        self,
+        proc: subprocess.Popen,
+        drainer: _StderrDrainer | None,
+    ) -> str:
+        instance_id = self._next_cleanup_id(proc.pid)
+        self._processes[instance_id] = proc
+        if drainer is not None:
+            self._stderr_drainers[instance_id] = drainer
+        self._unregistered_sessions.add(instance_id)
+        return instance_id
+
+    def _next_cleanup_id(self, pid: int) -> str:
+        self._cleanup_sequence += 1
+        instance_id = f"pending-{pid}-{self._cleanup_sequence}"
+        while (
+            instance_id in self._processes
+            or instance_id in self._pending_registry_contexts
+        ):
+            self._cleanup_sequence += 1
+            instance_id = f"pending-{pid}-{self._cleanup_sequence}"
+        return instance_id
+
+    def _failed_start_result(
+        self,
+        *,
+        proc: subprocess.Popen,
+        drainer: _StderrDrainer | None,
+        return_code: int | None,
+        error: str,
+        registered: bool | None = False,
+        registry_state: str | None = None,
+        registry_context: dict[str, Any] | None = None,
+    ) -> dict:
+        if self._process_stop_confirmed(proc, return_code):
+            if drainer is not None:
+                drainer.finish()
+            else:
+                self._close_stderr_stream(proc)
+            result: dict[str, Any] = {
+                "error": error,
+                "pid": proc.pid,
+                "managed": False,
+                "registered": registered,
+                "process_stopped": True,
+            }
+            if registry_context is not None:
+                instance_id = self._next_cleanup_id(proc.pid)
+                self._pending_registry_contexts[instance_id] = {
+                    **registry_context,
+                    "state": registry_state or "unknown",
+                }
+                self._unregistered_sessions.add(instance_id)
+                result.update({
+                    "instance_id": instance_id,
+                    "registry_cleaned": None,
+                    "hint": (
+                        "Worker stopped; retry idalib_close with instance_id "
+                        f"'{instance_id}' to reconcile registry cleanup."
+                    ),
+                })
+            if registry_state is not None:
+                result["registry_state"] = registry_state
+            return result
+
+        instance_id = self._track_unregistered_worker(proc, drainer)
+        if registry_context is not None:
+            self._pending_registry_contexts[instance_id] = {
+                **registry_context,
+                "state": registry_state or "unknown",
+            }
+        result = {
+            "error": (
+                f"{error} Cleanup could not be confirmed; the worker remains managed "
+                "locally for a later close retry."
+            ),
+            "instance_id": instance_id,
+            "pid": proc.pid,
+            "managed": True,
+            "registered": registered,
+            "hint": f"Retry idalib_close with instance_id '{instance_id}'.",
+        }
+        if registry_state is not None:
+            result["registry_state"] = registry_state
+        return result
+
+    @staticmethod
+    def _owned_worker_result(
+        *,
+        instance_id: str,
+        host: str,
+        port: int,
+        pid: int,
+        binary_name: str,
+        registry_reconciled: bool,
+        warnings: list[str],
+    ) -> dict:
+        result = {
+            "instance_id": instance_id,
+            "host": host,
+            "port": port,
+            "pid": pid,
+            "binary": binary_name,
+            "backend": "headless",
+            "owned": True,
+            "adopted": False,
+            "managed": True,
+            "registered": True,
+            "registry_reconciled": registry_reconciled,
+        }
+        if warnings:
+            result["warning"] = " ".join(warnings)
+        return result
+
+    def _reconcile_registration(
+        self,
+        *,
+        pid: int,
+        host: str,
+        port: int,
+        input_path: str,
+        ownership_nonce: str,
+    ) -> tuple[str | None, dict[str, Any] | None, str, str | None]:
+        """Find the one exact entry that register() may have committed."""
+        try:
+            entries = self.registry.list_instances()
+        except Exception as exc:
+            detail = str(exc).replace(ownership_nonce, "<redacted>")
+            return None, None, "unknown", detail
+        if not isinstance(entries, dict):
+            return None, None, "unknown", "registry listing was not a mapping"
+
+        wanted_path = _normalized_path(input_path)
+        matches: list[tuple[str, dict[str, Any]]] = []
+        try:
+            for instance_id, info in entries.items():
+                if not isinstance(instance_id, str) or not isinstance(info, dict):
+                    continue
+                if info.get("type") != "idalib":
+                    continue
+                if info.get("backend") != "headless" or info.get("owned") is not True:
+                    continue
+                if type(info.get("pid")) is not int or info.get("pid") != pid:
+                    continue
+                if type(info.get("worker_pid")) is not int or info.get("worker_pid") != pid:
+                    continue
+                if info.get("host") != host:
+                    continue
+                if type(info.get("port")) is not int or info.get("port") != port:
+                    continue
+                if _normalized_path(info.get("input_path")) != wanted_path:
+                    continue
+                if _normalized_path(info.get("idb_path")) != wanted_path:
+                    continue
+                candidate_nonce = info.get("_manager_nonce")
+                if not isinstance(candidate_nonce, str):
+                    continue
+                if not secrets.compare_digest(candidate_nonce, ownership_nonce):
+                    continue
+                matches.append((instance_id, info))
+        except Exception as exc:
+            detail = str(exc).replace(ownership_nonce, "<redacted>")
+            return None, None, "unknown", detail
+
+        if len(matches) == 1:
+            instance_id, info = matches[0]
+            return instance_id, info, "committed", None
+        if not matches:
+            return None, None, "absent", None
+        return None, None, "ambiguous", f"{len(matches)} exact entries matched"
+
+    def _cleanup_pending_registry(
+        self,
+        instance_id: str,
+        *,
+        process_stopped: bool,
+    ) -> dict:
+        """Retry registry reconciliation for a local cleanup identifier."""
+        context = self._pending_registry_contexts[instance_id]
+        reconciled_id, _info, state, detail = self._reconcile_registration(
+            pid=context["pid"],
+            host=context["host"],
+            port=context["port"],
+            input_path=context["input_path"],
+            ownership_nonce=context["ownership_nonce"],
+        )
+        context["state"] = state
+
+        if reconciled_id is not None:
+            try:
+                self.registry.unregister(reconciled_id)
+            except Exception as exc:
+                cleanup_error = str(exc).replace(
+                    context["ownership_nonce"],
+                    "<redacted>",
+                )
+                return {
+                    "ok": False,
+                    "error": (
+                        "Worker stopped, but reconciled registry cleanup failed: "
+                        f"{cleanup_error}"
+                    ),
+                    "instance_id": instance_id,
+                    "registry_instance_id": reconciled_id,
+                    "pid": context["pid"],
+                    "managed": False,
+                    "registered": True,
+                    "registry_state": "committed",
+                    "process_stopped": process_stopped,
+                    "registry_cleaned": False,
+                }
+            self._pending_registry_contexts.pop(instance_id, None)
+            self._unregistered_sessions.discard(instance_id)
+            return {
+                "ok": True,
+                "instance_id": instance_id,
+                "registry_instance_id": reconciled_id,
+                "pid": context["pid"],
+                "managed": False,
+                "registered": False,
+                "registry_state": "committed",
+                "process_stopped": process_stopped,
+                "registry_cleaned": True,
+                "note": "reconciled registry entry removed after worker stop",
+            }
+
+        if state == "absent":
+            self._pending_registry_contexts.pop(instance_id, None)
+            self._unregistered_sessions.discard(instance_id)
+            return {
+                "ok": True,
+                "instance_id": instance_id,
+                "pid": context["pid"],
+                "managed": False,
+                "registered": False,
+                "registry_state": "absent",
+                "process_stopped": process_stopped,
+                "registry_cleaned": True,
+                "note": "registry confirmed absent after worker stop",
+            }
+
+        return {
+            "ok": False,
+            "error": (
+                "Worker stopped, but registry cleanup state remains "
+                f"{state}"
+                + (f": {detail}" if detail else ".")
+            ),
+            "instance_id": instance_id,
+            "pid": context["pid"],
+            "managed": False,
+            "registered": None,
+            "registry_state": state,
+            "process_stopped": process_stopped,
+            "registry_cleaned": None,
+            "hint": f"Retry idalib_close with instance_id '{instance_id}'.",
+        }
+
+    @staticmethod
+    def _stop_process(proc: subprocess.Popen, *, terminate_timeout: float) -> int | None:
+        """Stop and reap *proc*, escalating from terminate to kill."""
+        try:
+            return_code = proc.poll()
+        except Exception:
+            return_code = None
+
+        if return_code is not None:
+            return return_code
+
+        try:
+            proc.terminate()
+        except Exception:
+            pass
+
+        try:
+            return proc.wait(timeout=terminate_timeout)
+        except subprocess.TimeoutExpired:
+            pass
+        except Exception:
+            pass
+
+        try:
+            proc.kill()
+        except Exception:
+            pass
+        try:
+            return proc.wait(timeout=_KILL_WAIT_TIMEOUT)
+        except subprocess.TimeoutExpired:
+            return None
+        except Exception:
+            return getattr(proc, "returncode", None)
+
+    def _finish_drainer(
+        self,
+        instance_id: str,
+        proc: subprocess.Popen | None = None,
+    ) -> None:
+        drainer = self._stderr_drainers.pop(instance_id, None)
+        if drainer is not None:
+            drainer.finish()
+        elif proc is not None:
+            self._close_stderr_stream(proc)
 
     def _select_preferred_instance(self, instance_id: str, mode: str, input_path: str) -> dict:
         info = self.registry.get_instance(instance_id)

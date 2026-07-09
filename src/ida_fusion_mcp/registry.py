@@ -189,14 +189,15 @@ class InstanceRegistry:
             with os.fdopen(temp_fd, 'w') as f:
                 temp_fd = None  # fdopen takes ownership of fd
                 json.dump(data, f, indent=2)
+                f.flush()
+                # Finalize permissions while failure still leaves the previous
+                # registry intact. os.replace() is the commit boundary below.
+                if sys.platform != "win32":
+                    os.fchmod(f.fileno(), stat.S_IRUSR | stat.S_IWUSR)
 
             # Atomic rename
             os.replace(temp_path, self.registry_path)
             temp_path = None  # Rename succeeded, don't clean up
-
-            # Set restrictive file permissions on Unix
-            if sys.platform != "win32":
-                os.chmod(self.registry_path, stat.S_IRUSR | stat.S_IWUSR)
         finally:
             # Clean up temp file on failure
             if temp_fd is not None:

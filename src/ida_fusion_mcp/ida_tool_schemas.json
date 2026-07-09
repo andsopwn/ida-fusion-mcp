@@ -438,6 +438,10 @@
               "additionalProperties": false
             }
           ]
+        },
+        "limit": {
+          "type": "integer",
+          "description": "Max xrefs per field (default: 100, max: 1000)"
         }
       },
       "required": [

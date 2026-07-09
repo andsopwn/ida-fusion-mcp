@@ -181,8 +181,9 @@ IDALIB_TOOL_SCHEMAS: list[dict] = [
     {
         "name": "idalib_close",
         "description": (
-            "Close a headless idalib session and terminate its worker process. "
-            "The instance is removed from the registry."
+            "Close a headless idalib session owned by this router and terminate its worker. "
+            "Live sessions owned by another router are left registered; confirmed-dead "
+            "stale entries may be removed."
         ),
         "inputSchema": {
             "type": "object",

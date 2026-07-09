@@ -835,7 +835,24 @@ def idb_save(
         if not save_path:
             return {"ok": False, "path": None, "error": "Could not resolve IDB path"}
 
-        ok = bool(ida_loader.save_database(save_path, 0))
+        try:
+            is_gui = bool(ida_kernwin.is_idaq())
+        except Exception as exc:
+            return {
+                "ok": False,
+                "path": save_path,
+                "error": f"Could not determine GUI/headless runtime: {exc}",
+            }
+
+        if is_gui:
+            current = ida_loader.get_path(ida_loader.PATH_TYPE_IDB)
+            if path and save_path != current:
+                ok = bool(ida_loader.save_database(save_path, ida_loader.DBFL_COMP))
+            else:
+                ok = bool(ida_loader.save_database(None, 0))
+        else:
+            flags = ida_loader.DBFL_KILL | ida_loader.DBFL_COMP
+            ok = bool(ida_loader.save_database(save_path, flags))
         result: dict = {"ok": ok, "path": save_path}
         if not ok:
             result["error"] = "save_database returned false"

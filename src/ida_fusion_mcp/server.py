@@ -5,8 +5,11 @@ Aggregates tools from multiple IDA instances and routes requests.
 
 import os
 import re
+import secrets
+import stat
 import sys
 import json
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -21,6 +24,392 @@ from .cache import get_cache, DEFAULT_MAX_OUTPUT_CHARS
 # Static IDA tool schemas (loaded once at import time)
 _STATIC_IDA_TOOLS_PATH = Path(__file__).parent / "ida_tool_schemas.json"
 _STATIC_IDA_TOOLS: list[dict] | None = None
+
+_DIR_FD_SUPPORTED = (
+    os.name != "nt"
+    and hasattr(os, "O_DIRECTORY")
+    and hasattr(os, "O_NOFOLLOW")
+)
+
+
+class _OutputDirectory:
+    """Hold and revalidate the directory selected for decompiler output."""
+
+    def __init__(self, path: str):
+        self.path = path
+        self.fd: int | None = None
+        initial = os.stat(path)
+        self._identity = (initial.st_dev, initial.st_ino)
+
+        if _DIR_FD_SUPPORTED:
+            flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+            if hasattr(os, "O_CLOEXEC"):
+                flags |= os.O_CLOEXEC
+            fd = os.open(path, flags)
+            opened = os.fstat(fd)
+            if (opened.st_dev, opened.st_ino) != self._identity:
+                os.close(fd)
+                raise OSError("output_dir changed while it was being secured")
+            self.fd = fd
+
+        try:
+            self.revalidate()
+        except Exception:
+            self.close()
+            raise
+
+    def __enter__(self) -> "_OutputDirectory":
+        return self
+
+    def __exit__(self, _exc_type, _exc, _tb) -> None:
+        self.close()
+
+    def close(self) -> None:
+        fd = self.fd
+        self.fd = None
+        if fd is not None:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+
+    def revalidate(self) -> None:
+        try:
+            current_path = os.path.realpath(self.path)
+            current = os.stat(self.path)
+        except (OSError, TypeError, ValueError) as exc:
+            raise OSError(f"output_dir changed after validation: {exc}") from exc
+
+        identity = (current.st_dev, current.st_ino)
+        if os.path.normcase(current_path) != os.path.normcase(self.path):
+            raise OSError("output_dir changed after validation")
+        if identity != self._identity:
+            raise OSError("output_dir changed after validation")
+        if self.fd is not None:
+            opened = os.fstat(self.fd)
+            if (opened.st_dev, opened.st_ino) != self._identity:
+                raise OSError("secured output_dir identity changed")
+
+
+def _leaf_lstat(output: _OutputDirectory, leaf_name: str):
+    if output.fd is None:
+        try:
+            return os.lstat(os.path.join(output.path, leaf_name))
+        except FileNotFoundError:
+            return None
+    try:
+        return os.stat(leaf_name, dir_fd=output.fd, follow_symlinks=False)
+    except FileNotFoundError:
+        return None
+
+
+def _leaf_is_symlink(output: _OutputDirectory, leaf_name: str) -> bool:
+    info = _leaf_lstat(output, leaf_name)
+    return info is not None and stat.S_ISLNK(info.st_mode)
+
+
+def _file_identity(info: os.stat_result) -> tuple[int, int]:
+    return (info.st_dev, info.st_ino)
+
+
+def _leaf_has_identity(
+    output: _OutputDirectory,
+    leaf_name: str,
+    identity: tuple[int, int],
+) -> bool:
+    info = _leaf_lstat(output, leaf_name)
+    return info is not None and _file_identity(info) == identity
+
+
+def _open_temporary_leaf(output: _OutputDirectory) -> tuple[int, str]:
+    if output.fd is None:
+        fd, path = tempfile.mkstemp(
+            prefix=".ida-fusion-",
+            suffix=".tmp",
+            dir=output.path,
+        )
+        return fd, os.path.basename(path)
+
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    if hasattr(os, "O_CLOEXEC"):
+        flags |= os.O_CLOEXEC
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    for _ in range(100):
+        name = f".ida-fusion-{secrets.token_hex(8)}.tmp"
+        try:
+            fd = os.open(name, flags, 0o600, dir_fd=output.fd)
+            return fd, name
+        except FileExistsError:
+            continue
+    raise OSError("could not allocate a unique temporary output file")
+
+
+def _replace_leaf(output: _OutputDirectory, source: str, destination: str) -> None:
+    if output.fd is not None:
+        os.replace(
+            source,
+            destination,
+            src_dir_fd=output.fd,
+            dst_dir_fd=output.fd,
+        )
+    else:
+        os.replace(
+            os.path.join(output.path, source),
+            os.path.join(output.path, destination),
+        )
+
+
+def _link_leaf(output: _OutputDirectory, source: str, destination: str) -> None:
+    if output.fd is not None:
+        os.link(
+            source,
+            destination,
+            src_dir_fd=output.fd,
+            dst_dir_fd=output.fd,
+            follow_symlinks=False,
+        )
+    else:
+        os.link(
+            os.path.join(output.path, source),
+            os.path.join(output.path, destination),
+            follow_symlinks=False,
+        )
+
+
+def _unlink_leaf(output: _OutputDirectory, leaf_name: str) -> None:
+    try:
+        if output.fd is not None:
+            os.unlink(leaf_name, dir_fd=output.fd)
+        else:
+            os.unlink(os.path.join(output.path, leaf_name))
+    except FileNotFoundError:
+        pass
+
+
+def _unlink_leaf_if_identity(
+    output: _OutputDirectory,
+    leaf_name: str,
+    identity: tuple[int, int],
+) -> bool:
+    """Unlink a leaf only when it is still the file this operation owns."""
+    if not _leaf_has_identity(output, leaf_name, identity):
+        return False
+    _unlink_leaf(output, leaf_name)
+    return True
+
+
+def _create_rollback_link(
+    output: _OutputDirectory,
+    leaf_name: str,
+    original_identity: tuple[int, int],
+) -> str:
+    """Retain the old inode without making the destination disappear."""
+    for _ in range(100):
+        backup_name = f".ida-fusion-{secrets.token_hex(8)}.bak"
+        try:
+            _link_leaf(output, leaf_name, backup_name)
+        except FileExistsError:
+            continue
+        except Exception:
+            # A wrapper may raise after link() has already committed.
+            backup_info = _leaf_lstat(output, backup_name)
+            if (
+                backup_info is not None
+                and _file_identity(backup_info) == original_identity
+            ):
+                try:
+                    _unlink_leaf_if_identity(
+                        output,
+                        backup_name,
+                        original_identity,
+                    )
+                except OSError:
+                    pass
+            raise
+
+        backup_info = _leaf_lstat(output, backup_name)
+        if backup_info is None:
+            raise OSError("rollback backup disappeared during creation")
+        backup_identity = _file_identity(backup_info)
+        if backup_identity != original_identity:
+            raise OSError("output leaf changed while creating rollback backup")
+        return backup_name
+    raise OSError("could not allocate a unique output rollback backup")
+
+
+def _atomic_write_text(
+    output: _OutputDirectory,
+    leaf_name: str,
+    writer: Any,
+) -> None:
+    """Atomically replace one leaf without resolving a changed parent path."""
+    if os.path.basename(leaf_name) != leaf_name or leaf_name in {"", ".", ".."}:
+        raise OSError(f"invalid output filename: {leaf_name!r}")
+
+    output.revalidate()
+    if _leaf_is_symlink(output, leaf_name):
+        raise OSError(f"refusing to overwrite symbolic link: {leaf_name}")
+
+    fd, temp_name = _open_temporary_leaf(output)
+    temp_identity = _file_identity(os.fstat(fd))
+    backup_name = ""
+    original_identity: tuple[int, int] | None = None
+    backup_active = False
+
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as stream:
+            fd = -1
+            writer(stream)
+            stream.flush()
+        output.revalidate()
+        destination_info = _leaf_lstat(output, leaf_name)
+        if destination_info is not None and stat.S_ISLNK(destination_info.st_mode):
+            raise OSError(f"refusing to overwrite symbolic link: {leaf_name}")
+        if destination_info is not None:
+            if not stat.S_ISREG(destination_info.st_mode):
+                raise OSError(f"refusing to replace non-regular output leaf: {leaf_name}")
+            original_identity = _file_identity(destination_info)
+
+        try:
+            if original_identity is not None:
+                backup_name = _create_rollback_link(
+                    output,
+                    leaf_name,
+                    original_identity,
+                )
+                backup_active = True
+                output.revalidate()
+
+            _replace_leaf(output, temp_name, leaf_name)
+            output.revalidate()
+            if not _leaf_has_identity(output, leaf_name, temp_identity):
+                raise OSError("output leaf changed during commit")
+        except Exception as exc:
+            if (
+                original_identity is not None
+                and backup_name
+                and _leaf_has_identity(output, backup_name, original_identity)
+            ):
+                # os.replace() may have committed before a wrapper raised.
+                backup_active = True
+
+            rollback_errors: list[str] = []
+            current_leaf = _leaf_lstat(output, leaf_name)
+            if (
+                current_leaf is not None
+                and _file_identity(current_leaf) == temp_identity
+            ):
+                try:
+                    if not _unlink_leaf_if_identity(output, leaf_name, temp_identity):
+                        rollback_errors.append("generated output leaf changed before removal")
+                except OSError as rollback_exc:
+                    rollback_errors.append(str(rollback_exc))
+            elif (
+                current_leaf is not None
+                and backup_active
+                and _file_identity(current_leaf) != original_identity
+            ):
+                rollback_errors.append(
+                    "output leaf changed; refusing to overwrite it during rollback"
+                )
+
+            if backup_active:
+                try:
+                    current_leaf = _leaf_lstat(output, leaf_name)
+                    if (
+                        current_leaf is not None
+                        and _file_identity(current_leaf) == original_identity
+                    ):
+                        backup_info = _leaf_lstat(output, backup_name)
+                        if backup_info is None:
+                            backup_active = False
+                            backup_name = ""
+                        elif _file_identity(backup_info) != original_identity:
+                            rollback_errors.append("original rollback backup changed")
+                        elif _unlink_leaf_if_identity(
+                            output,
+                            backup_name,
+                            original_identity,
+                        ):
+                            backup_active = False
+                            backup_name = ""
+                        else:
+                            rollback_errors.append(
+                                "original rollback backup changed before cleanup"
+                            )
+                    elif current_leaf is not None:
+                        rollback_errors.append(
+                            "output leaf occupied; original preserved in rollback backup"
+                        )
+                    elif not _leaf_has_identity(
+                        output,
+                        backup_name,
+                        original_identity,
+                    ):
+                        rollback_errors.append("original rollback backup changed")
+                    else:
+                        _replace_leaf(output, backup_name, leaf_name)
+                        if not _leaf_has_identity(
+                            output,
+                            leaf_name,
+                            original_identity,
+                        ):
+                            rollback_errors.append("original output restoration was not durable")
+                        else:
+                            backup_active = False
+                            backup_name = ""
+                except OSError as rollback_exc:
+                    rollback_errors.append(str(rollback_exc))
+            if rollback_errors:
+                raise OSError(
+                    f"{exc}; output rollback failed: {'; '.join(rollback_errors)}"
+                ) from exc
+            raise
+
+        # The generated leaf is now committed and validated. Backup cleanup is
+        # intentionally outside the rollback region: once the old hard link is
+        # gone, removing the generated leaf could only cause data loss.
+        temp_name = ""
+        if backup_active:
+            try:
+                backup_removed = _unlink_leaf_if_identity(
+                    output,
+                    backup_name,
+                    original_identity,
+                )
+            except OSError:
+                # unlink() may commit before an instrumentation wrapper raises.
+                if (
+                    _leaf_lstat(output, backup_name) is None
+                    and _leaf_has_identity(output, leaf_name, temp_identity)
+                ):
+                    backup_removed = True
+                else:
+                    raise
+            if (
+                not backup_removed
+                and _leaf_lstat(output, backup_name) is None
+                and _leaf_has_identity(output, leaf_name, temp_identity)
+            ):
+                backup_removed = True
+            if not backup_removed:
+                raise OSError(
+                    "output committed, but rollback backup changed before cleanup"
+                )
+            backup_active = False
+            backup_name = ""
+    finally:
+        if fd >= 0:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+        if temp_name:
+            try:
+                _unlink_leaf_if_identity(output, temp_name, temp_identity)
+            except OSError:
+                pass
 
 
 def _load_static_ida_tools() -> list[dict]:
@@ -355,7 +744,8 @@ class IdaFusionMcpServer:
         """
         decompile_all = arguments.get("all", False)
         addrs = arguments.get("addrs", [])
-        output_dir = arguments.get("output_dir", ".")
+        output_dir = arguments.get("output_dir")
+        allow_outside_cwd = arguments.get("allow_outside_cwd", False)
         mode = arguments.get("mode", "single")
         instance_id = arguments.get("instance_id")
         if not instance_id:
@@ -364,18 +754,83 @@ class IdaFusionMcpServer:
                 "hint": "Call list_instances() and pass instance_id explicitly.",
             }
 
-        # Security: validate output_dir to prevent path traversal
-        resolved_dir = os.path.realpath(output_dir)
-        # Reject absolute paths that escape CWD unless they are subdirectories
-        if ".." in os.path.normpath(output_dir).split(os.sep):
+        if not isinstance(output_dir, str) or not output_dir.strip():
+            return {"error": "output_dir must be a non-empty string"}
+        if not isinstance(allow_outside_cwd, bool):
+            return {"error": "allow_outside_cwd must be a boolean"}
+        if not allow_outside_cwd and not _DIR_FD_SUPPORTED:
+            return {
+                "error": (
+                    "Default output confinement requires secure directory descriptors "
+                    "on this platform. Pass allow_outside_cwd=true to use the "
+                    "path-based fallback."
+                )
+            }
+
+        # Inspect raw components before normalization, which would erase '..'.
+        component_path = output_dir
+        if os.altsep:
+            component_path = component_path.replace(os.altsep, os.sep)
+        if ".." in component_path.split(os.sep):
             return {"error": "output_dir must not contain '..' path components"}
-        # Warn but allow absolute paths (they may be intentional from the user)
+
+        try:
+            if os.path.lexists(output_dir) and not os.path.isdir(output_dir):
+                return {"error": f"output_dir exists but is not a directory: {output_dir}"}
+
+            resolved_dir = os.path.realpath(output_dir)
+            if not allow_outside_cwd:
+                cwd = os.path.realpath(os.getcwd())
+                within_cwd = os.path.commonpath([cwd, resolved_dir]) == cwd
+                if not within_cwd:
+                    return {
+                        "error": (
+                            "output_dir must be within the current working directory. "
+                            "Pass allow_outside_cwd=true to write elsewhere."
+                        ),
+                        "cwd": cwd,
+                    }
+        except (OSError, TypeError, ValueError) as exc:
+            return {"error": f"invalid output_dir: {exc}"}
         output_dir = resolved_dir
 
-        # addr → name mapping (populated by list_funcs when using 'all')
+        if not decompile_all and not addrs:
+            return {"error": "No addresses provided. Pass 'addrs' array or set 'all' to true."}
+
+        try:
+            os.makedirs(output_dir, exist_ok=True)
+            is_directory = os.path.isdir(output_dir)
+        except (OSError, TypeError, ValueError) as exc:
+            return {"error": f"Failed to create output_dir: {exc}"}
+        if not is_directory:
+            return {"error": f"output_dir exists but is not a directory: {output_dir}"}
+
+        try:
+            with _OutputDirectory(output_dir) as secured_output:
+                return self._decompile_to_output_dir(
+                    decompile_all=decompile_all,
+                    addrs=addrs,
+                    output_dir=output_dir,
+                    output=secured_output,
+                    mode=mode,
+                    instance_id=instance_id,
+                )
+        except (OSError, TypeError, ValueError) as exc:
+            return {"error": f"Failed to secure output_dir: {exc}"}
+
+    def _decompile_to_output_dir(
+        self,
+        *,
+        decompile_all: bool,
+        addrs: list,
+        output_dir: str,
+        output: _OutputDirectory,
+        mode: str,
+        instance_id: str,
+    ) -> dict:
+        """Run router calls and write through a held output-directory identity."""
         addr_names: dict[str, str] = {}
 
-        # Fetch all function addresses via paginated list_funcs calls
         if decompile_all:
             addrs = []
             offset = 0
@@ -406,7 +861,6 @@ class IdaFusionMcpServer:
                             addrs.append(f["addr"])
                             if "name" in f:
                                 addr_names[f["addr"]] = f["name"]
-                    # Check if there are more pages
                     next_offset = raw[0].get("next_offset")
                     if next_offset is None or len(page_data) < page_size:
                         break
@@ -416,12 +870,6 @@ class IdaFusionMcpServer:
 
             if not addrs:
                 return {"error": "No functions found in binary"}
-
-        if not addrs:
-            return {"error": "No addresses provided. Pass 'addrs' array or set 'all' to true."}
-
-        # Ensure output directory exists
-        os.makedirs(output_dir, exist_ok=True)
 
         success = 0
         failed = 0
@@ -448,7 +896,9 @@ class IdaFusionMcpServer:
 
         if mode == "merged":
             merged_path = os.path.join(output_dir, "decompiled.c")
-            with open(merged_path, "w", encoding="utf-8") as f:
+
+            def _write_merged(f):
+                nonlocal success, failed
                 for addr in addrs:
                     decomp = _call_decompile(addr)
                     code = decomp.get("code")
@@ -461,6 +911,10 @@ class IdaFusionMcpServer:
                     else:
                         failed += 1
                         failed_addrs.append(addr)
+            try:
+                _atomic_write_text(output, "decompiled.c", _write_merged)
+            except Exception as exc:
+                return {"error": f"Failed to write '{merged_path}': {exc}"}
             files_written.append("decompiled.c")
         else:
             # single mode: one file per function
@@ -476,10 +930,15 @@ class IdaFusionMcpServer:
                     addr_suffix = re.sub(r"[^0-9A-Fa-fx]", "_", str(addr))
                     filename = f"{safe_name}_{addr_suffix}.c"
                     filepath = os.path.join(output_dir, filename)
-                    with open(filepath, "w", encoding="utf-8") as f:
+
+                    def _write_single(f):
                         f.write(f"// {name} @ {addr}\n")
                         f.write(code)
                         f.write("\n")
+                    try:
+                        _atomic_write_text(output, filename, _write_single)
+                    except Exception as exc:
+                        return {"error": f"Failed to write '{filepath}': {exc}"}
                     files_written.append(filename)
                     success += 1
                 else:
@@ -623,6 +1082,10 @@ class IdaFusionMcpServer:
                     "output_dir": {
                         "type": "string",
                         "description": "Directory to save decompiled files"
+                    },
+                    "allow_outside_cwd": {
+                        "type": "boolean",
+                        "description": "Permit output_dir outside the current working directory (default: false)."
                     },
                     "mode": {
                         "type": "string",

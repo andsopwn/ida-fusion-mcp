@@ -400,10 +400,15 @@ def xrefs_from(
 
 @tool
 @idasync
-def xrefs_to_field(queries: list[StructFieldQuery] | StructFieldQuery) -> list[dict]:
+def xrefs_to_field(
+    queries: list[StructFieldQuery] | StructFieldQuery,
+    limit: Annotated[int, "Max xrefs per field (default: 100, max: 1000)"] = 100,
+) -> list[dict]:
     """Get cross-references to structure fields"""
     if isinstance(queries, dict):
         queries = [queries]
+    if limit <= 0 or limit > 1000:
+        limit = 1000
 
     # Security: limit batch size
     from .utils import MAX_BATCH_SIZE
@@ -468,16 +473,25 @@ def xrefs_to_field(queries: list[StructFieldQuery] | StructFieldQuery) -> list[d
                 continue
 
             xrefs = []
+            more = False
             xref: ida_xref.xrefblk_t
             for xref in idautils.XrefsTo(tid):
-                xrefs += [
+                if len(xrefs) >= limit:
+                    more = True
+                    break
+                xrefs.append(
                     Xref(
                         addr=hex(xref.frm),
                         type="code" if xref.iscode else "data",
                         fn=get_function(xref.frm, raise_error=False),
                     )
-                ]
-            results.append({"struct": struct_name, "field": field_name, "xrefs": xrefs})
+                )
+            results.append({
+                "struct": struct_name,
+                "field": field_name,
+                "xrefs": xrefs,
+                "more": more,
+            })
         except Exception as e:
             results.append(
                 {
