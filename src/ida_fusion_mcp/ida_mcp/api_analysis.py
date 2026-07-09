@@ -10,6 +10,7 @@ import ida_typeinf
 import ida_nalt
 import ida_bytes
 import ida_ida
+import ida_kernwin
 import ida_entry
 import ida_idaapi
 import ida_xref
@@ -575,6 +576,19 @@ def callees(
 # ============================================================================
 
 
+def _native_search_cursor(
+    matches: list,
+    offset: int,
+    limit: int,
+    more: bool,
+) -> dict:
+    if ida_kernwin.user_cancelled():
+        return {"next": offset + len(matches), "cancelled": True}
+    if more:
+        return {"next": offset + limit}
+    return {"done": True}
+
+
 @tool
 @idasync
 def find_bytes(
@@ -636,14 +650,13 @@ def find_bytes(
         except Exception:
             pass
 
-        results.append(
-            {
-                "pattern": pattern,
-                "matches": matches,
-                "n": len(matches),
-                "cursor": {"next": offset + limit} if more else {"done": True},
-            }
-        )
+        cursor = _native_search_cursor(matches, offset, limit, more)
+        results.append({
+            "pattern": pattern,
+            "matches": matches,
+            "n": len(matches),
+            "cursor": cursor,
+        })
     return results
 
 
@@ -810,15 +823,14 @@ def find(
             except Exception:
                 pass
 
-            results.append(
-                {
-                    "query": pattern_str,
-                    "matches": matches,
-                    "count": len(matches),
-                    "cursor": {"next": offset + limit} if more else {"done": True},
-                    "error": None,
-                }
-            )
+            cursor = _native_search_cursor(matches, offset, limit, more)
+            results.append({
+                "query": pattern_str,
+                "matches": matches,
+                "count": len(matches),
+                "cursor": cursor,
+                "error": None,
+            })
 
     elif type == "immediate":
         # Search for immediate values
@@ -882,15 +894,14 @@ def find(
             except Exception:
                 pass
 
-            results.append(
-                {
-                    "query": value,
-                    "matches": matches,
-                    "count": len(matches),
-                    "cursor": {"next": offset + limit} if more else {"done": True},
-                    "error": None,
-                }
-            )
+            cursor = _native_search_cursor(matches, offset, limit, more)
+            results.append({
+                "query": value,
+                "matches": matches,
+                "count": len(matches),
+                "cursor": cursor,
+                "error": None,
+            })
 
     elif type == "data_ref":
         # Find all data references to targets
