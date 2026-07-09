@@ -92,10 +92,15 @@ The legacy `ida-multi-mcp` console command is still provided as an alias. New co
 
 ### Requirements
 
-- Python 3.11 or newer for the MCP server.
-- IDA Pro 8.3 or newer.
-- IDA's embedded Python must also be able to import the installed package.
-- `idalib` features require IDA Pro; IDA Home/Free do not provide headless `idalib`.
+| Mode | IDA edition/version | Python | Extra package |
+|---|---|---|---|
+| GUI plugin | IDA Pro/Home 8.3+ | IDA's matching Python, server on 3.11+ | none |
+| Managed headless | IDA Pro 9.x with `libidalib` | server/worker on 3.11+ | `ida-fusion-mcp[idalib]` |
+
+Baseline verification covers the local IDA Pro 9.3 GUI on macOS arm64 and its
+application-bundle layout. Post-change GUI routing remains pending until a real
+restart passes, and live headless support remains pending until the licensed
+`idapro` probe and managed-session check both pass.
 
 ### macOS
 
@@ -119,6 +124,18 @@ For Claude Code, a direct CLI registration is usually clearer than a module comm
 ```bash
 claude mcp add ida-fusion-mcp -s user -- ida-fusion-mcp
 ```
+
+For managed headless sessions, install the optional `idapro` dependency into a
+Python 3.11 environment and pass that exact interpreter to the server:
+
+```bash
+python3.11 -m pip install \
+  "ida-fusion-mcp[idalib] @ git+https://github.com/andsopwn/ida-fusion-mcp.git"
+python3.11 -m ida_fusion_mcp --idalib-python "$(command -v python3.11)"
+```
+
+GUI mode does not require `idapro`. Headless mode requires IDA Pro 9.x with
+`libidalib` and an interpreter where `import idapro` is discoverable.
 
 ### Windows
 

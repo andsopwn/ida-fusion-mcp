@@ -2,15 +2,20 @@
 
 This guide is for AI agents. Follow each step exactly.
 
-Last updated: 2026-02-17
+Last updated: 2026-07-10
 Governance reference: `docs/README.md`
 Authority note: this document is operational guidance and must not redefine contracts.
 
 ## Prerequisites
 
-- Python 3.11+
-- IDA Pro 8.3+ (9.0 recommended)
-- pip (Python package manager)
+| Mode | IDA edition/version | Python | Extra package |
+|---|---|---|---|
+| GUI plugin | IDA Pro/Home 8.3+ | IDA's matching Python, server on 3.11+ | none |
+| Managed headless | IDA Pro 9.x with `libidalib` | server/worker on 3.11+ | `ida-fusion-mcp[idalib]` |
+
+Baseline verification covers the local IDA Pro 9.3 GUI on macOS arm64 and its
+application-bundle layout. Post-change GUI restart confirmation and live
+managed idalib remain pending.
 
 ## Important: IDA Python Version Mismatch
 
@@ -110,6 +115,36 @@ python3.11 -m pip install --user --break-system-packages git+https://github.com/
 python3.11 -m ida_fusion_mcp --install
 ```
 
+For a system-wide IDA application bundle, both the bundle root and normalized
+runtime payload are accepted:
+
+```bash
+ida-fusion-mcp --install --ida-dir "/Applications/IDA Professional 9.3.app"
+# Equivalent normalized payload path:
+ida-fusion-mcp --install --ida-dir "/Applications/IDA Professional 9.3.app/Contents/MacOS"
+```
+
+For managed headless sessions, install and verify the optional dependency with
+the exact worker interpreter:
+
+```bash
+python3.11 -m pip install --upgrade \
+  "ida-fusion-mcp[idalib] @ git+https://github.com/andsopwn/ida-fusion-mcp.git"
+python3.11 -c "import idapro; print(idapro.__file__)"
+```
+
+When the licensed IDA bundle supplies the `idapro` wheel directly, install both
+ida-fusion-mcp and that wheel into a separate worker interpreter, then pass the
+interpreter explicitly:
+
+```bash
+/path/to/idalib-python -m pip install \
+  git+https://github.com/andsopwn/ida-fusion-mcp.git
+/path/to/idalib-python -m pip install \
+  "/Applications/IDA Professional 9.3.app/Contents/MacOS/idalib/python/idapro-0.0.7-py3-none-any.whl"
+ida-fusion-mcp --idalib-python /path/to/idalib-python
+```
+
 **How to find IDA's Python version on macOS:**
 1. Open IDA Pro with any binary
 2. In the IDA console (Output window), run:
@@ -206,9 +241,14 @@ Pass criteria:
 
 ### 2) Plugin deployment health
 
-macOS/Linux:
+macOS/Linux default per-user directory:
 ```bash
 ls -l ~/.idapro/plugins/ida_fusion_mcp.py
+```
+
+macOS explicit application-bundle directory:
+```bash
+ls -l "/Applications/IDA Professional 9.3.app/Contents/MacOS/plugins/ida_fusion_mcp.py"
 ```
 
 Windows (PowerShell):
@@ -243,9 +283,11 @@ If post-flight checks fail, apply fixes in order.
 
 1. Python mismatch suspected:
    - Re-check IDA console Python version (`import sys; print(sys.version)`).
-   - Reinstall with that exact version (`python3.11 -m pip install ...` or `py -3.12 -m pip install ...`).
+   - On macOS/Linux, reinstall with the exact IDA version: `python3.11 -m pip install --upgrade git+https://github.com/andsopwn/ida-fusion-mcp.git`.
+   - On Windows, use: `py -3.12 -m pip install --upgrade git+https://github.com/andsopwn/ida-fusion-mcp.git`.
 2. Plugin loader missing:
-   - Re-run `ida-fusion-mcp --install` (or `--install --ida-dir <IDA_DIR>` for custom installs).
+   - Re-run `ida-fusion-mcp --install` for the per-user plugin directory.
+   - For the macOS application bundle, run `ida-fusion-mcp --install --ida-dir "/Applications/IDA Professional 9.3.app"`.
 3. No instances registered:
    - Restart IDA.
    - Open any binary.
@@ -256,9 +298,9 @@ If post-flight checks fail, apply fixes in order.
    - Re-check client config (`ida-fusion-mcp --config`).
 5. Still failing:
    - Run clean reinstall:
-     - `ida-fusion-mcp --uninstall`
+     - Run `ida-fusion-mcp --uninstall` for a per-user install, or `ida-fusion-mcp --uninstall --ida-dir "/Applications/IDA Professional 9.3.app"` for the explicit application-bundle install.
      - uninstall package (`pip uninstall ida-fusion-mcp` and/or `pipx uninstall ida-fusion-mcp`)
-     - install again from scratch
+     - reinstall with `python -m pip install git+https://github.com/andsopwn/ida-fusion-mcp.git` or `pipx install git+https://github.com/andsopwn/ida-fusion-mcp.git`
 
 ## Troubleshooting
 
@@ -286,20 +328,22 @@ If the loader prints `Searched paths:`, check if any of those paths contain `ida
 
 ## Coexistence with ida-pro-mcp
 
-If you previously used ida-pro-mcp, note that ida-fusion-mcp now bundles all IDA tools internally.
-You can remove the original `ida_mcp.py` from the IDA plugins directory to avoid conflicts.
-Both can run simultaneously (they bind to different ports), but it's recommended to use only ida-fusion-mcp.
+ida-fusion-mcp and an independent ida-pro-mcp installation may coexist on
+different ports. The ida-fusion installer never migrates or deletes
+`ida-pro-mcp`, `github.com/mrexodia/ida-pro-mcp`, or the `ida_mcp.py` loader.
+Remove those manually only if you intentionally choose to stop using the
+independent project.
 
 ## Uninstallation
 
+`ida-fusion-mcp --uninstall` removes only the `ida-fusion-mcp` client entries,
+the `ida_fusion_mcp.py` loader, the owned legacy `ida_multi_mcp.py` loader, and
+fusion's registry files. Independent ida-pro-mcp client entries and loaders are
+preserved.
+
+If installation used an explicit IDA directory, repeat the same override so
+the matching loader is removed:
+
 ```bash
-# Remove IDA plugin, registry, and MCP client configurations
-ida-fusion-mcp --uninstall
-
-# Remove the Python package
-pip uninstall ida-fusion-mcp
-# If installed via pipx:
-pipx uninstall ida-fusion-mcp
+ida-fusion-mcp --uninstall --ida-dir "/Applications/IDA Professional 9.3.app"
 ```
-
-The `--uninstall` command automatically removes the IDA plugin, cleans up the registry, and removes MCP client configurations.

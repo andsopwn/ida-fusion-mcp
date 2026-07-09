@@ -9,7 +9,8 @@ The loader auto-discovers the package from multiple installation methods:
   - homebrew Python site-packages (macOS)
 
 Installation:
-  pip install ida-fusion-mcp   (or pipx install ida-fusion-mcp)
+  python -m pip install git+https://github.com/andsopwn/ida-fusion-mcp.git
+  pipx install git+https://github.com/andsopwn/ida-fusion-mcp.git
   ida-fusion-mcp --install
 """
 
@@ -108,8 +109,14 @@ def PLUGIN_ENTRY():
         print(f"[ida-fusion-mcp] Searched paths:")
         for p in _collect_candidate_paths():
             print(f"[ida-fusion-mcp]   {p}")
-        print("[ida-fusion-mcp] Install with: pip install ida-fusion-mcp")
-        print("[ida-fusion-mcp]   or: pipx install ida-fusion-mcp")
+        print(
+            "[ida-fusion-mcp] Install with: python -m pip install "
+            "git+https://github.com/andsopwn/ida-fusion-mcp.git"
+        )
+        print(
+            "[ida-fusion-mcp]   or: pipx install "
+            "git+https://github.com/andsopwn/ida-fusion-mcp.git"
+        )
         # Return a dummy plugin that does nothing
         import idaapi
 
