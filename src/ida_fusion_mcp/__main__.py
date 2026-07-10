@@ -60,7 +60,7 @@ _VSCODE_EXTENSION_IDS: dict[str, tuple[str, ...]] = {
 
 
 def _client_is_detected(name: str, config_path: Path) -> bool:
-    """Return true only for an existing config or a real client install."""
+    """Return true for an existing config or a concrete client install marker."""
     extension_ids = _VSCODE_EXTENSION_IDS.get(name)
     if extension_ids is not None:
         return any(
@@ -69,6 +69,13 @@ def _client_is_detected(name: str, config_path: Path) -> bool:
         )
 
     if config_path.is_file():
+        return True
+
+    # GUI clients commonly create their private settings directory before
+    # their first MCP config. Treat that directory as an install marker, but
+    # never use HOME itself (which would detect root-level configs everywhere).
+    config_dir = config_path.parent
+    if config_dir != Path.home() and config_dir.is_dir():
         return True
 
     for command in _CLIENT_COMMANDS.get(name, ()):

@@ -133,15 +133,25 @@ python3.11 -c "import idapro; print(idapro.__file__)"
 ```
 
 When the licensed IDA bundle supplies the `idapro` wheel directly, install both
-ida-fusion-mcp and that wheel into a separate worker interpreter, then pass the
-interpreter explicitly:
+ida-fusion-mcp and that wheel into a separate worker interpreter, then persist
+that interpreter in the MCP client's server arguments:
 
 ```bash
 /path/to/idalib-python -m pip install \
   git+https://github.com/andsopwn/ida-fusion-mcp.git
 /path/to/idalib-python -m pip install \
   "/Applications/IDA Professional 9.3.app/Contents/MacOS/idalib/python/idapro-0.0.7-py3-none-any.whl"
-ida-fusion-mcp --idalib-python /path/to/idalib-python
+claude mcp add ida-fusion-mcp -s user -- \
+  ida-fusion-mcp --idalib-python /path/to/idalib-python
+```
+
+For a JSON-based client, the persistent server entry is:
+
+```json
+{
+  "command": "/absolute/path/to/server-python",
+  "args": ["-m", "ida_fusion_mcp", "--idalib-python", "/absolute/path/to/idalib-python"]
+}
 ```
 
 **How to find IDA's Python version on macOS:**

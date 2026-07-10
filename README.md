@@ -132,12 +132,25 @@ claude mcp add ida-fusion-mcp -s user -- ida-fusion-mcp
 ```
 
 For managed headless sessions, install the optional `idapro` dependency into a
-Python 3.11 environment and pass that exact interpreter to the server:
+Python 3.11 environment. Persist that exact worker interpreter in the MCP
+client registration; running the server once with the flag does not update the
+client's saved configuration. Use this registration instead of the GUI-only
+Claude Code command above:
 
 ```bash
 python3.11 -m pip install \
   "ida-fusion-mcp[idalib] @ git+https://github.com/andsopwn/ida-fusion-mcp.git"
-python3.11 -m ida_fusion_mcp --idalib-python "$(command -v python3.11)"
+claude mcp add ida-fusion-mcp -s user -- \
+  ida-fusion-mcp --idalib-python /absolute/path/to/idalib-python
+```
+
+For JSON-based clients, store the same argument in the server entry:
+
+```json
+{
+  "command": "/absolute/path/to/server-python",
+  "args": ["-m", "ida_fusion_mcp", "--idalib-python", "/absolute/path/to/idalib-python"]
+}
 ```
 
 GUI mode does not require `idapro`. Headless mode requires IDA Pro 9.x with
