@@ -1,5 +1,17 @@
 [
   {
+    "name": "refresh_caches",
+    "description": "Force-refresh all caches (strings, functions, globals).",
+    "inputSchema": {
+      "type": "object",
+      "properties": {},
+      "required": []
+    },
+    "outputSchema": {
+      "type": "object"
+    }
+  },
+  {
     "name": "lookup_funcs",
     "description": "Get functions by address or name (auto-detects)",
     "inputSchema": {
@@ -222,38 +234,6 @@
     }
   },
   {
-    "name": "refresh_caches",
-    "description": "Force-refresh all caches (strings, functions, globals). Call this after bulk modifications to ensure list_funcs/list_globals return fresh data.",
-    "inputSchema": {
-      "type": "object",
-      "properties": {},
-      "required": []
-    },
-    "outputSchema": {
-      "type": "object",
-      "properties": {
-        "strings": {
-          "type": "integer"
-        },
-        "functions": {
-          "type": "integer"
-        },
-        "globals": {
-          "type": "integer"
-        },
-        "time_ms": {
-          "type": "integer"
-        }
-      },
-      "required": [
-        "strings",
-        "functions",
-        "globals",
-        "time_ms"
-      ]
-    }
-  },
-  {
     "name": "imports",
     "description": "List imports",
     "inputSchema": {
@@ -294,6 +274,317 @@
         "offset": {
           "type": "integer",
           "description": "Skip first N matches (default: 0)"
+        }
+      },
+      "required": [
+        "pattern"
+      ]
+    },
+    "outputSchema": {
+      "type": "object"
+    }
+  },
+  {
+    "name": "server_health",
+    "description": "Health/ready probe for MCP server and current IDB state. Returns\nuptime, IDB path, auto-analysis status, Hex-Rays availability, and\nstrings cache state.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {},
+      "required": []
+    },
+    "outputSchema": {
+      "type": "object"
+    }
+  },
+  {
+    "name": "server_warmup",
+    "description": "Warm up IDA subsystems to reduce first-call latency. Call after\nconnecting to a new instance to ensure analysis is complete and caches\nare populated before running tools.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "wait_auto_analysis": {
+          "type": "boolean",
+          "description": "Wait for auto analysis queue"
+        },
+        "build_caches": {
+          "type": "boolean",
+          "description": "Build core caches (currently strings)"
+        },
+        "init_hexrays": {
+          "type": "boolean",
+          "description": "Initialize Hex-Rays decompiler plugin"
+        }
+      },
+      "required": []
+    },
+    "outputSchema": {
+      "type": "object"
+    }
+  },
+  {
+    "name": "func_query",
+    "description": "Query functions with richer filtering than list_funcs. Supports regex\nname filter, size range, type filter, sort by size/name/addr, and pagination.\nExample: {name_regex: 'crypt', min_size: 100, sort_by: 'size', descending: true}",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "queries": {
+          "anyOf": [
+            {
+              "type": "array",
+              "items": {
+                "type": "object"
+              }
+            },
+            {
+              "type": "object"
+            }
+          ],
+          "description": "Function query: filter, name_regex, min_size, max_size, has_type, sort_by, descending, offset, count"
+        }
+      },
+      "required": [
+        "queries"
+      ]
+    },
+    "outputSchema": {
+      "type": "array",
+      "items": {
+        "type": "object"
+      }
+    }
+  },
+  {
+    "name": "entity_query",
+    "description": "Query IDB entities with typed filters, projection, and pagination.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "queries": {
+          "anyOf": [
+            {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "description": "functions|globals|imports|strings|names"
+                  },
+                  "filter": {
+                    "type": "string",
+                    "description": "Glob/regex filter"
+                  },
+                  "regex": {
+                    "type": "string",
+                    "description": "Regex on primary text field"
+                  },
+                  "min_addr": {
+                    "type": "string",
+                    "description": "Min address bound"
+                  },
+                  "max_addr": {
+                    "type": "string",
+                    "description": "Max address bound"
+                  },
+                  "segment": {
+                    "type": "string",
+                    "description": "Segment filter"
+                  },
+                  "module": {
+                    "type": "string",
+                    "description": "Import module filter"
+                  },
+                  "offset": {
+                    "type": "integer",
+                    "description": "Start index"
+                  },
+                  "count": {
+                    "type": "integer",
+                    "description": "Max results (0=all)"
+                  },
+                  "sort_by": {
+                    "type": "string",
+                    "description": "Sort: addr|name|size|length"
+                  },
+                  "descending": {
+                    "type": "boolean",
+                    "description": "Descending"
+                  },
+                  "fields": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    },
+                    "description": "Projection field list"
+                  }
+                },
+                "required": [
+                  "kind"
+                ],
+                "additionalProperties": false
+              }
+            },
+            {
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "description": "functions|globals|imports|strings|names"
+                },
+                "filter": {
+                  "type": "string",
+                  "description": "Glob/regex filter"
+                },
+                "regex": {
+                  "type": "string",
+                  "description": "Regex on primary text field"
+                },
+                "min_addr": {
+                  "type": "string",
+                  "description": "Min address bound"
+                },
+                "max_addr": {
+                  "type": "string",
+                  "description": "Max address bound"
+                },
+                "segment": {
+                  "type": "string",
+                  "description": "Segment filter"
+                },
+                "module": {
+                  "type": "string",
+                  "description": "Import module filter"
+                },
+                "offset": {
+                  "type": "integer",
+                  "description": "Start index"
+                },
+                "count": {
+                  "type": "integer",
+                  "description": "Max results (0=all)"
+                },
+                "sort_by": {
+                  "type": "string",
+                  "description": "Sort: addr|name|size|length"
+                },
+                "descending": {
+                  "type": "boolean",
+                  "description": "Descending"
+                },
+                "fields": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  },
+                  "description": "Projection field list"
+                }
+              },
+              "required": [
+                "kind"
+              ],
+              "additionalProperties": false
+            }
+          ],
+          "description": "Generic entity query with filtering, projection, and pagination"
+        }
+      },
+      "required": [
+        "queries"
+      ]
+    },
+    "outputSchema": {
+      "type": "array",
+      "items": {
+        "type": "object"
+      }
+    }
+  },
+  {
+    "name": "imports_query",
+    "description": "Query imports with module and name filters. Example:\n{module: 'kernel32', filter: '*File*'} to find all kernel32 file I/O imports.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "queries": {
+          "anyOf": [
+            {
+              "type": "array",
+              "items": {
+                "type": "object"
+              }
+            },
+            {
+              "type": "object"
+            }
+          ],
+          "description": "Import query: filter (import name pattern), module (module name pattern), offset, count"
+        }
+      },
+      "required": [
+        "queries"
+      ]
+    },
+    "outputSchema": {
+      "type": "array",
+      "items": {
+        "type": "object"
+      }
+    }
+  },
+  {
+    "name": "idb_save",
+    "description": "Save active IDB to disk. Call after renaming, retyping, or commenting\nto persist changes. Optionally specify a custom output path.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "path": {
+          "type": "string",
+          "description": "Optional destination path (default: current IDB path)"
+        }
+      },
+      "required": []
+    },
+    "outputSchema": {
+      "type": "object"
+    }
+  },
+  {
+    "name": "search_text",
+    "description": "Search rendered listing text over [start, end).\n\nThis walks IDA heads in bounded chunks instead of calling\nida_search.find_text(), which can block inside a large segment without\nyielding to timeout or cancel handling.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "pattern": {
+          "type": "string",
+          "description": "Text to search for in the rendered listing"
+        },
+        "limit": {
+          "type": "integer",
+          "description": "Max hits per page (default: 30, max: 500)"
+        },
+        "start": {
+          "type": "string",
+          "description": "Lower bound or cursor address. Empty = first segment."
+        },
+        "end": {
+          "type": "string",
+          "description": "Upper bound (exclusive). Empty = last segment."
+        },
+        "regex": {
+          "type": "boolean",
+          "description": "Treat pattern as a regex"
+        },
+        "case_sensitive": {
+          "type": "boolean",
+          "description": "Case-sensitive match"
+        },
+        "include": {
+          "type": "string",
+          "description": "'disasm' | 'comments' | 'all'"
+        },
+        "code_only": {
+          "type": "boolean",
+          "description": "Restrict search to executable segments"
         }
       },
       "required": [
@@ -373,6 +664,42 @@
             }
           ],
           "description": "Addresses to find cross-references to"
+        },
+        "limit": {
+          "type": "integer",
+          "description": "Max xrefs per address (default: 100, max: 1000)"
+        }
+      },
+      "required": [
+        "addrs"
+      ]
+    },
+    "outputSchema": {
+      "type": "array",
+      "items": {
+        "type": "object"
+      }
+    }
+  },
+  {
+    "name": "xrefs_from",
+    "description": "Get cross-references from specified addresses (symmetric with xrefs_to).\nReturns outgoing code and data references for each address.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "addrs": {
+          "anyOf": [
+            {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            {
+              "type": "string"
+            }
+          ],
+          "description": "Addresses to find cross-references from"
         },
         "limit": {
           "type": "integer",
@@ -708,6 +1035,200 @@
     }
   },
   {
+    "name": "xref_query",
+    "description": "Query cross-references with direction and type filters.\ndirection='to' finds refs TO addr, 'from' finds refs FROM addr, 'both' finds all.\ntype_filter='code' shows only code xrefs, 'data' only data, 'all' shows both.\nSupports dedup and pagination.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "queries": {
+          "anyOf": [
+            {
+              "type": "array",
+              "items": {
+                "type": "object"
+              }
+            },
+            {
+              "type": "object"
+            }
+          ],
+          "description": "Xref query: addr, direction (to/from/both), type_filter (code/data/all), offset, count"
+        }
+      },
+      "required": [
+        "queries"
+      ]
+    },
+    "outputSchema": {
+      "type": "array",
+      "items": {
+        "type": "object"
+      }
+    }
+  },
+  {
+    "name": "insn_query",
+    "description": "Search instructions by mnemonic and/or operand values within a function,\nsegment, or global scope. Uses existing scan infrastructure.\nExample: {mnem: 'call', func: '0x401000'} or {mnem: 'syscall'}",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "queries": {
+          "anyOf": [
+            {
+              "type": "array",
+              "items": {
+                "type": "object"
+              }
+            },
+            {
+              "type": "object"
+            }
+          ],
+          "description": "Instruction pattern: mnem, op0, op1, op2, op_any, func, segment, offset, count"
+        }
+      },
+      "required": [
+        "queries"
+      ]
+    },
+    "outputSchema": {
+      "type": "array",
+      "items": {
+        "type": "object"
+      }
+    }
+  },
+  {
+    "name": "analyze_batch",
+    "description": "Analyze multiple functions in one call. Selectively include decompilation,\ndisassembly, xrefs, strings, and callees per function. More efficient than\ncalling analyze_function N times \u2014 single IDA round-trip.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "addrs": {
+          "anyOf": [
+            {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            {
+              "type": "string"
+            }
+          ],
+          "description": "Function addresses to analyze"
+        },
+        "include_decompile": {
+          "type": "boolean",
+          "description": "Include pseudocode (default: true)"
+        },
+        "include_asm": {
+          "type": "boolean",
+          "description": "Include disassembly (default: false)"
+        },
+        "include_xrefs": {
+          "type": "boolean",
+          "description": "Include xrefs (default: true)"
+        },
+        "include_strings": {
+          "type": "boolean",
+          "description": "Include strings (default: true)"
+        },
+        "include_callees": {
+          "type": "boolean",
+          "description": "Include callees (default: true)"
+        }
+      },
+      "required": [
+        "addrs"
+      ]
+    },
+    "outputSchema": {
+      "type": "array",
+      "items": {
+        "type": "object"
+      }
+    }
+  },
+  {
+    "name": "classify_functions",
+    "description": "Classify functions as thunk/wrapper/leaf/dispatcher/complex based on\nsize, callee count, and flags. Use '*' (default) for all non-library\nfunctions. Returns paginated results sorted by address.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "addrs": {
+          "anyOf": [
+            {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            {
+              "type": "string"
+            }
+          ],
+          "description": "Function addresses (or '*' for all non-library functions)"
+        },
+        "offset": {
+          "type": "integer",
+          "description": "Skip first N results (default: 0)"
+        },
+        "count": {
+          "type": "integer",
+          "description": "Max results (default: 500, max: 5000)"
+        }
+      },
+      "required": []
+    },
+    "outputSchema": {
+      "type": "object"
+    }
+  },
+  {
+    "name": "func_profile",
+    "description": "Per-function profile: size, basic block count, cyclomatic complexity,\ncallee/caller counts, and string count. Useful for prioritizing which\nfunctions to analyze deeply. Fills the gap between list_funcs (too little\ninfo) and analyze_function (too expensive per call).",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "addrs": {
+          "anyOf": [
+            {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            {
+              "type": "string"
+            }
+          ],
+          "description": "Function addresses (or '*' for all)"
+        },
+        "offset": {
+          "type": "integer",
+          "description": "Skip first N (default: 0)"
+        },
+        "count": {
+          "type": "integer",
+          "description": "Max results (default: 100, max: 1000)"
+        },
+        "sort_by": {
+          "type": "string",
+          "description": "Sort key: size, complexity, xref_count, callee_count, name (default: size)"
+        },
+        "descending": {
+          "type": "boolean",
+          "description": "Sort descending (default: true)"
+        }
+      },
+      "required": []
+    },
+    "outputSchema": {
+      "type": "object"
+    }
+  },
+  {
     "name": "get_bytes",
     "description": "Read bytes from memory addresses",
     "inputSchema": {
@@ -864,7 +1385,7 @@
   },
   {
     "name": "get_global_value",
-    "description": "Read global variable values by address or name\n    (auto-detects hex addresses vs names)",
+    "description": "Read global variable values by address or name\n(auto-detects hex addresses vs names)",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -1061,7 +1582,7 @@
   },
   {
     "name": "read_struct",
-    "description": "Reads struct type definition and parses actual memory values at the\n    given address as instances of that struct type.\n\n    If struct name is not provided, attempts to auto-detect from address.\n    Auto-detection only works if IDA already has type information applied\n    at that address\n\n    Returns struct layout with actual memory values for each field.",
+    "description": "Reads struct type definition and parses actual memory values at the\ngiven address as instances of that struct type.\n\nIf struct name is not provided, attempts to auto-detect from address.\nAuto-detection only works if IDA already has type information applied\nat that address\n\nReturns struct layout with actual memory values for each field.",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -1137,8 +1658,196 @@
     }
   },
   {
+    "name": "type_query",
+    "description": "Query local types with structured filters and pagination.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "queries": {
+          "anyOf": [
+            {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "filter": {
+                    "type": "string",
+                    "description": "Name glob/regex"
+                  },
+                  "kind": {
+                    "type": "string",
+                    "description": "any|struct|union|enum|typedef|func|ptr|udt"
+                  },
+                  "offset": {
+                    "type": "integer",
+                    "description": "Start index"
+                  },
+                  "count": {
+                    "type": "integer",
+                    "description": "Max results (0=all)"
+                  },
+                  "sort_by": {
+                    "type": "string",
+                    "description": "Sort: name|size|ordinal"
+                  },
+                  "descending": {
+                    "type": "boolean",
+                    "description": "Descending"
+                  },
+                  "include_decl": {
+                    "type": "boolean",
+                    "description": "Include declaration text"
+                  },
+                  "include_members": {
+                    "type": "boolean",
+                    "description": "Include UDT member details"
+                  },
+                  "max_members": {
+                    "type": "integer",
+                    "description": "Max members per UDT"
+                  },
+                  "include_relationships": {
+                    "type": "boolean",
+                    "description": "Include related type names"
+                  }
+                },
+                "required": [],
+                "additionalProperties": false
+              }
+            },
+            {
+              "type": "object",
+              "properties": {
+                "filter": {
+                  "type": "string",
+                  "description": "Name glob/regex"
+                },
+                "kind": {
+                  "type": "string",
+                  "description": "any|struct|union|enum|typedef|func|ptr|udt"
+                },
+                "offset": {
+                  "type": "integer",
+                  "description": "Start index"
+                },
+                "count": {
+                  "type": "integer",
+                  "description": "Max results (0=all)"
+                },
+                "sort_by": {
+                  "type": "string",
+                  "description": "Sort: name|size|ordinal"
+                },
+                "descending": {
+                  "type": "boolean",
+                  "description": "Descending"
+                },
+                "include_decl": {
+                  "type": "boolean",
+                  "description": "Include declaration text"
+                },
+                "include_members": {
+                  "type": "boolean",
+                  "description": "Include UDT member details"
+                },
+                "max_members": {
+                  "type": "integer",
+                  "description": "Max members per UDT"
+                },
+                "include_relationships": {
+                  "type": "boolean",
+                  "description": "Include related type names"
+                }
+              },
+              "required": [],
+              "additionalProperties": false
+            }
+          ],
+          "description": "Type catalog query with filtering, pagination, and optional relationships"
+        }
+      },
+      "required": [
+        "queries"
+      ]
+    },
+    "outputSchema": {
+      "type": "array",
+      "items": {
+        "type": "object"
+      }
+    }
+  },
+  {
+    "name": "type_inspect",
+    "description": "Inspect named types with size, declaration, and optional member layout.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "queries": {
+          "anyOf": [
+            {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "name": {
+                    "type": "string",
+                    "description": "Type name"
+                  },
+                  "include_members": {
+                    "type": "boolean",
+                    "description": "Include UDT member details"
+                  },
+                  "max_members": {
+                    "type": "integer",
+                    "description": "Max members"
+                  }
+                },
+                "required": [
+                  "name"
+                ],
+                "additionalProperties": false
+              }
+            },
+            {
+              "type": "object",
+              "properties": {
+                "name": {
+                  "type": "string",
+                  "description": "Type name"
+                },
+                "include_members": {
+                  "type": "boolean",
+                  "description": "Include UDT member details"
+                },
+                "max_members": {
+                  "type": "integer",
+                  "description": "Max members"
+                }
+              },
+              "required": [
+                "name"
+              ],
+              "additionalProperties": false
+            }
+          ],
+          "description": "Inspect named types and optionally include member layout"
+        }
+      },
+      "required": [
+        "queries"
+      ]
+    },
+    "outputSchema": {
+      "type": "array",
+      "items": {
+        "type": "object"
+      }
+    }
+  },
+  {
     "name": "set_type",
-    "description": "Apply types (function/global/local/stack)",
+    "description": "Apply types (function/global/local/stack).",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -1224,6 +1933,105 @@
     }
   },
   {
+    "name": "type_apply_batch",
+    "description": "Apply multiple type edits and return aggregate status.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "batch": {
+          "type": "object",
+          "properties": {
+            "edits": {
+              "anyOf": [
+                {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "addr": {
+                        "type": "string",
+                        "description": "Memory address"
+                      },
+                      "name": {
+                        "type": "string",
+                        "description": "Variable/function name"
+                      },
+                      "ty": {
+                        "type": "string",
+                        "description": "Type name or declaration"
+                      },
+                      "kind": {
+                        "type": "string",
+                        "description": "Type of entity (auto-detected if omitted)"
+                      },
+                      "signature": {
+                        "type": "string",
+                        "description": "Function signature (for kind=function)"
+                      },
+                      "variable": {
+                        "type": "string",
+                        "description": "Local variable name (for kind=local)"
+                      }
+                    },
+                    "required": [],
+                    "additionalProperties": false
+                  }
+                },
+                {
+                  "type": "object",
+                  "properties": {
+                    "addr": {
+                      "type": "string",
+                      "description": "Memory address"
+                    },
+                    "name": {
+                      "type": "string",
+                      "description": "Variable/function name"
+                    },
+                    "ty": {
+                      "type": "string",
+                      "description": "Type name or declaration"
+                    },
+                    "kind": {
+                      "type": "string",
+                      "description": "Type of entity (auto-detected if omitted)"
+                    },
+                    "signature": {
+                      "type": "string",
+                      "description": "Function signature (for kind=function)"
+                    },
+                    "variable": {
+                      "type": "string",
+                      "description": "Local variable name (for kind=local)"
+                    }
+                  },
+                  "required": [],
+                  "additionalProperties": false
+                }
+              ],
+              "description": "Type edits to apply"
+            },
+            "stop_on_error": {
+              "type": "boolean",
+              "description": "Stop on first failure"
+            }
+          },
+          "required": [
+            "edits"
+          ],
+          "additionalProperties": false,
+          "description": "Batch type edits with optional stop_on_error behavior"
+        }
+      },
+      "required": [
+        "batch"
+      ]
+    },
+    "outputSchema": {
+      "type": "object"
+    }
+  },
+  {
     "name": "infer_types",
     "description": "Infer types",
     "inputSchema": {
@@ -1246,6 +2054,38 @@
       },
       "required": [
         "addrs"
+      ]
+    },
+    "outputSchema": {
+      "type": "array",
+      "items": {
+        "type": "object"
+      }
+    }
+  },
+  {
+    "name": "enum_upsert",
+    "description": "Create or extend local enums in an idempotent way. Creates the enum if\nit doesn't exist, then upserts each member: skips if name+value already match,\nreports conflict if name or value collides with a different entry. Never\ndestructively replaces existing members.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "queries": {
+          "anyOf": [
+            {
+              "type": "array",
+              "items": {
+                "type": "object"
+              }
+            },
+            {
+              "type": "object"
+            }
+          ],
+          "description": "Enum upsert: name, members [{name, value}], bitfield (optional bool)"
+        }
+      },
+      "required": [
+        "queries"
       ]
     },
     "outputSchema": {
@@ -1289,9 +2129,13 @@
           "type": "string"
         },
         "slot": {
-          "type": [
-            "integer",
-            "null"
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
           ]
         },
         "title": {
@@ -1659,7 +2503,7 @@
   },
   {
     "name": "append_comments",
-    "description": "Append comments at addresses, deduping exact text by default. Unlike\n    set_comments (which overwrites), this preserves existing annotations \u2014 use\n    it for incremental commentary. scope='auto' (default) writes a function\n    comment when addr is a function start, otherwise a line comment; force\n    with scope='func' or 'line'. dedupe=True skips writes when the exact\n    stripped text already appears on its own line.",
+    "description": "Append comments at addresses, deduping exact text by default. Unlike\nset_comments (which overwrites), this preserves existing annotations \u2014 use\nit for incremental commentary. scope='auto' (default) writes a function\ncomment when addr is a function start, otherwise a line comment; force\nwith scope='func' or 'line'. dedupe=True skips writes when the exact\nstripped text already appears on its own line.",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -1755,7 +2599,7 @@
   },
   {
     "name": "define_func",
-    "description": "Define a function at each given address. IDA infers bounds unless an\n    explicit end address is provided. Returns {addr, start, end} on success or\n    {addr, start, error} if the function already exists or add_func fails.\n    Use this when IDA auto-analysis missed a function entry point.",
+    "description": "Define a function at each given address. IDA infers bounds unless an\nexplicit end address is provided. Returns {addr, start, end} on success or\n{addr, start, error} if the function already exists or add_func fails.\nUse this when IDA auto-analysis missed a function entry point.",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -1835,7 +2679,7 @@
   },
   {
     "name": "define_code",
-    "description": "Convert raw bytes to a code instruction at each given address. Returns\n    {addr, ea, length} on success (length is the instruction byte length) or\n    {addr, ea, error} if create_insn failed. Use this when IDA classified an\n    instruction as data or failed to decode.",
+    "description": "Convert raw bytes to a code instruction at each given address. Returns\n{addr, ea, length} on success (length is the instruction byte length) or\n{addr, ea, error} if create_insn failed. Use this when IDA classified an\ninstruction as data or failed to decode.",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -1915,7 +2759,7 @@
   },
   {
     "name": "undefine",
-    "description": "Undefine item(s) at each address, converting them back to raw bytes.\n    Size is determined from `end` (exclusive) or `size`; defaults to 1 byte.\n    Uses ida_bytes.DELIT_EXPAND so adjacent items spanning into the range are\n    fully removed. Returns {addr, start, size} on success.",
+    "description": "Undefine item(s) at each address, converting them back to raw bytes.\nSize is determined from `end` (exclusive) or `size`; defaults to 1 byte.\nUses ida_bytes.DELIT_EXPAND so adjacent items spanning into the range are\nfully removed. Returns {addr, start, size} on success.",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -2015,8 +2859,7 @@
                 "type": "object",
                 "properties": {
                   "addr": {
-                    "type": "string",
-                    "description": "Function entry address, or address inside a function"
+                    "type": "string"
                   }
                 },
                 "required": [],
@@ -2027,8 +2870,7 @@
               "type": "object",
               "properties": {
                 "addr": {
-                  "type": "string",
-                  "description": "Function entry address, or address inside a function"
+                  "type": "string"
                 }
               },
               "required": [],
@@ -2038,28 +2880,13 @@
               "type": "null"
             }
           ],
-          "description": "Omit or pass an empty list to invalidate every function"
+          "description": "List of {addr: function-entry-EA} ops, a single op, or omit/pass empty list to recompile every function."
         }
       },
       "required": []
     },
     "outputSchema": {
-      "type": "object",
-      "properties": {
-        "summary": {
-          "type": "object"
-        },
-        "results": {
-          "type": "array",
-          "items": {
-            "type": "object"
-          }
-        }
-      },
-      "required": [
-        "summary",
-        "results"
-      ]
+      "type": "object"
     }
   },
   {
@@ -2076,28 +2903,22 @@
                 "type": "object",
                 "properties": {
                   "addr": {
-                    "type": "string",
-                    "description": "Instruction address"
+                    "type": "string"
                   },
                   "op_n": {
-                    "type": "integer",
-                    "description": "Operand index, zero-based"
+                    "type": "integer"
                   },
                   "kind": {
-                    "type": "string",
-                    "description": "stroff, offset, stkvar, hex, dec, char, binary, or octal"
+                    "type": "string"
                   },
                   "struct": {
-                    "type": "string",
-                    "description": "Struct name for kind=stroff"
+                    "type": "string"
                   },
                   "delta": {
-                    "type": "integer",
-                    "description": "Struct offset delta for kind=stroff"
+                    "type": "integer"
                   },
                   "target_addr": {
-                    "type": "string",
-                    "description": "Optional target address for kind=offset"
+                    "type": "string"
                   }
                 },
                 "required": [],
@@ -2108,35 +2929,29 @@
               "type": "object",
               "properties": {
                 "addr": {
-                  "type": "string",
-                  "description": "Instruction address"
+                  "type": "string"
                 },
                 "op_n": {
-                  "type": "integer",
-                  "description": "Operand index, zero-based"
+                  "type": "integer"
                 },
                 "kind": {
-                  "type": "string",
-                  "description": "stroff, offset, stkvar, hex, dec, char, binary, or octal"
+                  "type": "string"
                 },
                 "struct": {
-                  "type": "string",
-                  "description": "Struct name for kind=stroff"
+                  "type": "string"
                 },
                 "delta": {
-                  "type": "integer",
-                  "description": "Struct offset delta for kind=stroff"
+                  "type": "integer"
                 },
                 "target_addr": {
-                  "type": "string",
-                  "description": "Optional target address for kind=offset"
+                  "type": "string"
                 }
               },
               "required": [],
               "additionalProperties": false
             }
           ],
-          "description": "Operand-typing operation or operations"
+          "description": "Operand-typing ops for struct offsets, plain offsets, stack vars, or numeric formats."
         }
       },
       "required": [
@@ -2183,20 +2998,16 @@
                 "type": "object",
                 "properties": {
                   "addr": {
-                    "type": "string",
-                    "description": "Address to define as typed data"
+                    "type": "string"
                   },
                   "type": {
-                    "type": "string",
-                    "description": "Full C declaration, e.g. 'int value'"
+                    "type": "string"
                   },
                   "name": {
-                    "type": "string",
-                    "description": "Optional symbol name"
+                    "type": "string"
                   },
                   "delete_existing": {
-                    "type": "boolean",
-                    "description": "Delete existing items across the inferred type size first"
+                    "type": "boolean"
                   }
                 },
                 "required": [],
@@ -2207,27 +3018,23 @@
               "type": "object",
               "properties": {
                 "addr": {
-                  "type": "string",
-                  "description": "Address to define as typed data"
+                  "type": "string"
                 },
                 "type": {
-                  "type": "string",
-                  "description": "Full C declaration, e.g. 'int value'"
+                  "type": "string"
                 },
                 "name": {
-                  "type": "string",
-                  "description": "Optional symbol name"
+                  "type": "string"
                 },
                 "delete_existing": {
-                  "type": "boolean",
-                  "description": "Delete existing items across the inferred type size first"
+                  "type": "boolean"
                 }
               },
               "required": [],
               "additionalProperties": false
             }
           ],
-          "description": "Typed data creation operation or operations"
+          "description": "Data-creation ops. Each {addr, type, name?} applies a fresh typed data item."
         }
       },
       "required": [
@@ -2426,8 +3233,769 @@
     }
   },
   {
+    "name": "dbg_start",
+    "description": "Start debugger",
+    "inputSchema": {
+      "type": "object",
+      "properties": {},
+      "required": []
+    }
+  },
+  {
+    "name": "dbg_status",
+    "description": "Return debugger lifecycle state and current IP if suspended.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {},
+      "required": []
+    },
+    "outputSchema": {
+      "type": "object"
+    }
+  },
+  {
+    "name": "dbg_exit",
+    "description": "Exit debugger",
+    "inputSchema": {
+      "type": "object",
+      "properties": {},
+      "required": []
+    }
+  },
+  {
+    "name": "dbg_continue",
+    "description": "Continue debugger",
+    "inputSchema": {
+      "type": "object",
+      "properties": {},
+      "required": []
+    },
+    "outputSchema": {
+      "type": "string"
+    }
+  },
+  {
+    "name": "dbg_run_to",
+    "description": "Run to address",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "addr": {
+          "type": "string",
+          "description": "Address"
+        }
+      },
+      "required": [
+        "addr"
+      ]
+    }
+  },
+  {
+    "name": "dbg_step_into",
+    "description": "Step into",
+    "inputSchema": {
+      "type": "object",
+      "properties": {},
+      "required": []
+    }
+  },
+  {
+    "name": "dbg_step_over",
+    "description": "Step over",
+    "inputSchema": {
+      "type": "object",
+      "properties": {},
+      "required": []
+    }
+  },
+  {
+    "name": "dbg_bps",
+    "description": "List breakpoints",
+    "inputSchema": {
+      "type": "object",
+      "properties": {},
+      "required": []
+    }
+  },
+  {
+    "name": "dbg_add_bp",
+    "description": "Add breakpoints",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "addrs": {
+          "anyOf": [
+            {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            {
+              "type": "string"
+            }
+          ],
+          "description": "Address(es) to add breakpoints at"
+        }
+      },
+      "required": [
+        "addrs"
+      ]
+    },
+    "outputSchema": {
+      "type": "array",
+      "items": {
+        "type": "object"
+      }
+    }
+  },
+  {
+    "name": "dbg_delete_bp",
+    "description": "Delete breakpoints",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "addrs": {
+          "anyOf": [
+            {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            {
+              "type": "string"
+            }
+          ],
+          "description": "Address(es) to delete breakpoints from"
+        }
+      },
+      "required": [
+        "addrs"
+      ]
+    },
+    "outputSchema": {
+      "type": "array",
+      "items": {
+        "type": "object"
+      }
+    }
+  },
+  {
+    "name": "dbg_toggle_bp",
+    "description": "Enable/disable breakpoints",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "items": {
+          "anyOf": [
+            {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "addr": {
+                    "type": "string",
+                    "description": "Breakpoint address (hex or decimal)"
+                  },
+                  "enabled": {
+                    "type": "boolean",
+                    "description": "Enable (true) or disable (false)"
+                  }
+                },
+                "required": [
+                  "addr",
+                  "enabled"
+                ],
+                "additionalProperties": false
+              }
+            },
+            {
+              "type": "object",
+              "properties": {
+                "addr": {
+                  "type": "string",
+                  "description": "Breakpoint address (hex or decimal)"
+                },
+                "enabled": {
+                  "type": "boolean",
+                  "description": "Enable (true) or disable (false)"
+                }
+              },
+              "required": [
+                "addr",
+                "enabled"
+              ],
+              "additionalProperties": false
+            }
+          ]
+        }
+      },
+      "required": [
+        "items"
+      ]
+    },
+    "outputSchema": {
+      "type": "array",
+      "items": {
+        "type": "object"
+      }
+    }
+  },
+  {
+    "name": "dbg_set_bp_condition",
+    "description": "Set or clear breakpoint conditions in batch.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "items": {
+          "anyOf": [
+            {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "addr": {
+                    "type": "string",
+                    "description": "Breakpoint address (hex or decimal)"
+                  },
+                  "condition": {
+                    "anyOf": [
+                      {
+                        "type": "string"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ],
+                    "description": "Breakpoint condition expression; null/empty clears it"
+                  },
+                  "language": {
+                    "anyOf": [
+                      {
+                        "type": "string"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ],
+                    "description": "Condition language ('idc', 'python', or exact IDA extlang name); null preserves current/default"
+                  },
+                  "low_level": {
+                    "type": "boolean",
+                    "description": "Set a low-level/server-side condition when true"
+                  }
+                },
+                "required": [
+                  "addr"
+                ],
+                "additionalProperties": false
+              }
+            },
+            {
+              "type": "object",
+              "properties": {
+                "addr": {
+                  "type": "string",
+                  "description": "Breakpoint address (hex or decimal)"
+                },
+                "condition": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ],
+                  "description": "Breakpoint condition expression; null/empty clears it"
+                },
+                "language": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ],
+                  "description": "Condition language ('idc', 'python', or exact IDA extlang name); null preserves current/default"
+                },
+                "low_level": {
+                  "type": "boolean",
+                  "description": "Set a low-level/server-side condition when true"
+                }
+              },
+              "required": [
+                "addr"
+              ],
+              "additionalProperties": false
+            }
+          ]
+        }
+      },
+      "required": [
+        "items"
+      ]
+    },
+    "outputSchema": {
+      "type": "array",
+      "items": {
+        "type": "object"
+      }
+    }
+  },
+  {
+    "name": "dbg_regs_all",
+    "description": "Get all registers for all threads.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {},
+      "required": []
+    },
+    "outputSchema": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "thread_id": {
+            "type": "integer"
+          },
+          "registers": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "name": {
+                  "type": "string"
+                },
+                "value": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "name",
+                "value"
+              ],
+              "additionalProperties": false
+            }
+          }
+        },
+        "required": [
+          "thread_id",
+          "registers"
+        ],
+        "additionalProperties": false
+      }
+    }
+  },
+  {
+    "name": "dbg_regs",
+    "description": "Get registers for the current thread. Use filter='gp' for general-purpose\nonly, or filter='named' with names='RAX,RBX' to select specific registers.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "filter": {
+          "type": "string",
+          "description": "Register filter: 'all' (default), 'gp' (general-purpose only), or 'named'"
+        },
+        "names": {
+          "type": "string",
+          "description": "Comma-separated register names (only used when filter='named', e.g. 'RAX,RBX,RCX')"
+        }
+      },
+      "required": []
+    },
+    "outputSchema": {
+      "type": "object",
+      "properties": {
+        "thread_id": {
+          "type": "integer"
+        },
+        "registers": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "name": {
+                "type": "string"
+              },
+              "value": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "name",
+              "value"
+            ],
+            "additionalProperties": false
+          }
+        }
+      },
+      "required": [
+        "thread_id",
+        "registers"
+      ],
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "dbg_regs_remote",
+    "description": "Get registers for specified thread(s). Use filter='gp' for general-purpose\nonly, or filter='named' with names='RAX,RBX' to select specific registers.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "tids": {
+          "anyOf": [
+            {
+              "type": "array",
+              "items": {
+                "type": "integer"
+              }
+            },
+            {
+              "type": "integer"
+            }
+          ],
+          "description": "Thread ID(s) to get registers for"
+        },
+        "filter": {
+          "type": "string",
+          "description": "Register filter: 'all' (default), 'gp', or 'named'"
+        },
+        "names": {
+          "type": "string",
+          "description": "Comma-separated register names (only used when filter='named')"
+        }
+      },
+      "required": [
+        "tids"
+      ]
+    },
+    "outputSchema": {
+      "type": "array",
+      "items": {
+        "type": "object"
+      }
+    }
+  },
+  {
+    "name": "dbg_gpregs_remote",
+    "description": "Get general-purpose registers for specified thread IDs.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "tids": {
+          "anyOf": [
+            {
+              "type": "array",
+              "items": {
+                "type": "integer"
+              }
+            },
+            {
+              "type": "integer"
+            }
+          ],
+          "description": "Thread ID(s) to get GP registers for"
+        }
+      },
+      "required": [
+        "tids"
+      ]
+    },
+    "outputSchema": {
+      "type": "array",
+      "items": {
+        "type": "object"
+      }
+    }
+  },
+  {
+    "name": "dbg_gpregs",
+    "description": "Get general-purpose registers for the current thread.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {},
+      "required": []
+    },
+    "outputSchema": {
+      "type": "object",
+      "properties": {
+        "thread_id": {
+          "type": "integer"
+        },
+        "registers": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "name": {
+                "type": "string"
+              },
+              "value": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "name",
+              "value"
+            ],
+            "additionalProperties": false
+          }
+        }
+      },
+      "required": [
+        "thread_id",
+        "registers"
+      ],
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "dbg_regs_named_remote",
+    "description": "Get selected registers for a specific thread ID.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "thread_id": {
+          "type": "integer",
+          "description": "Thread ID"
+        },
+        "register_names": {
+          "type": "string",
+          "description": "Comma-separated register names (e.g. 'RAX,RBX,RCX')"
+        }
+      },
+      "required": [
+        "thread_id",
+        "register_names"
+      ]
+    },
+    "outputSchema": {
+      "type": "object",
+      "properties": {
+        "thread_id": {
+          "type": "integer"
+        },
+        "registers": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "name": {
+                "type": "string"
+              },
+              "value": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "name",
+              "value"
+            ],
+            "additionalProperties": false
+          }
+        }
+      },
+      "required": [
+        "thread_id",
+        "registers"
+      ],
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "dbg_regs_named",
+    "description": "Get selected registers for the current thread.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "register_names": {
+          "type": "string",
+          "description": "Comma-separated register names (e.g. 'RAX,RBX,RCX')"
+        }
+      },
+      "required": [
+        "register_names"
+      ]
+    },
+    "outputSchema": {
+      "type": "object",
+      "properties": {
+        "thread_id": {
+          "type": "integer"
+        },
+        "registers": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "name": {
+                "type": "string"
+              },
+              "value": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "name",
+              "value"
+            ],
+            "additionalProperties": false
+          }
+        }
+      },
+      "required": [
+        "thread_id",
+        "registers"
+      ],
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "dbg_stacktrace",
+    "description": "Get call stack",
+    "inputSchema": {
+      "type": "object",
+      "properties": {},
+      "required": []
+    },
+    "outputSchema": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": {
+          "type": "string"
+        }
+      }
+    }
+  },
+  {
+    "name": "dbg_read",
+    "description": "Read debug memory",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "regions": {
+          "anyOf": [
+            {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "addr": {
+                    "type": "string",
+                    "description": "Address to read from (hex or decimal)"
+                  },
+                  "size": {
+                    "type": "integer",
+                    "description": "Number of bytes to read"
+                  }
+                },
+                "required": [
+                  "addr",
+                  "size"
+                ],
+                "additionalProperties": false
+              }
+            },
+            {
+              "type": "object",
+              "properties": {
+                "addr": {
+                  "type": "string",
+                  "description": "Address to read from (hex or decimal)"
+                },
+                "size": {
+                  "type": "integer",
+                  "description": "Number of bytes to read"
+                }
+              },
+              "required": [
+                "addr",
+                "size"
+              ],
+              "additionalProperties": false
+            }
+          ]
+        }
+      },
+      "required": [
+        "regions"
+      ]
+    },
+    "outputSchema": {
+      "type": "array",
+      "items": {
+        "type": "object"
+      }
+    }
+  },
+  {
+    "name": "dbg_write",
+    "description": "Write debug memory",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "regions": {
+          "anyOf": [
+            {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "addr": {
+                    "type": "string",
+                    "description": "Address to patch (hex or decimal)"
+                  },
+                  "data": {
+                    "type": "string",
+                    "description": "Hex data to write (space-separated bytes)"
+                  }
+                },
+                "required": [
+                  "addr",
+                  "data"
+                ],
+                "additionalProperties": false
+              }
+            },
+            {
+              "type": "object",
+              "properties": {
+                "addr": {
+                  "type": "string",
+                  "description": "Address to patch (hex or decimal)"
+                },
+                "data": {
+                  "type": "string",
+                  "description": "Hex data to write (space-separated bytes)"
+                }
+              },
+              "required": [
+                "addr",
+                "data"
+              ],
+              "additionalProperties": false
+            }
+          ]
+        }
+      },
+      "required": [
+        "regions"
+      ]
+    },
+    "outputSchema": {
+      "type": "array",
+      "items": {
+        "type": "object"
+      }
+    }
+  },
+  {
     "name": "py_eval",
-    "description": "Execute Python code in IDA context.\n    Returns dict with result/stdout/stderr.\n    Has access to all IDA API modules.\n    Supports Jupyter-style evaluation.",
+    "description": "Execute Python code in IDA context.\nReturns dict with result/stdout/stderr.\nHas access to all IDA API modules.\nSupports Jupyter-style evaluation. This unsafe tool uses defense-in-depth\nrestrictions but is not a process security sandbox.",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -2445,8 +4013,27 @@
     }
   },
   {
+    "name": "py_exec_file",
+    "description": "Execute a Python script file in IDA context.\n\nThis unsafe tool uses defense-in-depth restrictions but is not a process\nsecurity sandbox.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "file_path": {
+          "type": "string",
+          "description": "Absolute path to a Python script to execute"
+        }
+      },
+      "required": [
+        "file_path"
+      ]
+    },
+    "outputSchema": {
+      "type": "object"
+    }
+  },
+  {
     "name": "survey_binary",
-    "description": "Get a compact overview of the binary in one call. Returns file metadata,\n    segment layout, entry points, statistics, top 15 strings and functions ranked\n    by xref count (functions include classification: thunk/wrapper/leaf/dispatcher/\n    complex), imports by category, and call graph summary. Use this as your FIRST\n    tool call when starting analysis. Do not call list_funcs, imports, or find_regex\n    separately for triage \u2014 this returns all of that. Use detail_level='minimal'\n    for binaries with >10k functions.",
+    "description": "Get a compact overview of the binary in one call. Returns file metadata,\nsegment layout, entry points, statistics, top 15 strings and functions ranked\nby xref count (functions include classification: thunk/wrapper/leaf/dispatcher/\ncomplex), imports by category, and call graph summary. Use this as your FIRST\ntool call when starting analysis. Do not call list_funcs, imports, or find_regex\nseparately for triage \u2014 this returns all of that. Use detail_level='minimal'\nfor binaries with >10k functions.",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -2829,7 +4416,7 @@
   },
   {
     "name": "analyze_function",
-    "description": "Compact single-function analysis: pseudocode (capped at 100 lines), top\n    strings, top non-trivial constants, callers, callees, xrefs, comments, and\n    basic block summary. Use this for \"tell me everything about function X\" in\n    one call instead of chaining decompile + callees + xrefs_to separately.",
+    "description": "Compact single-function analysis: pseudocode (capped at 100 lines), top\nstrings, top non-trivial constants, callers, callees, xrefs, comments, and\nbasic block summary. Use this for \"tell me everything about function X\" in\none call instead of chaining decompile + callees + xrefs_to separately.",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -2963,7 +4550,7 @@
   },
   {
     "name": "analyze_component",
-    "description": "Analyze related functions as a group: per-function compact summaries,\n    internal call graph (edges only between supplied functions), shared globals,\n    interface vs internal classification, and strings used by multiple members.",
+    "description": "Analyze related functions as a group: per-function compact summaries,\ninternal call graph (edges only between supplied functions), shared globals,\ninterface vs internal classification, and strings used by multiple members.",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -3135,7 +4722,7 @@
   },
   {
     "name": "diff_before_after",
-    "description": "Apply a rename/type/comment action and return the before/after decompilation\n    side by side. Actions: 'rename_func' ({name}), 'set_type' ({type}),\n    'set_comment' ({comment}). Useful to verify a rename or type change actually\n    improved readability. Returns {before, after, action_applied, changes_detected}.",
+    "description": "Apply a rename/type/comment action and return the before/after decompilation\nside by side. Actions: 'rename_func' ({name}), 'set_type' ({type}),\n'set_comment' ({comment}). Useful to verify a rename or type change actually\nimproved readability. Returns {before, after, action_applied, changes_detected}.",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -3197,7 +4784,7 @@
   },
   {
     "name": "trace_data_flow",
-    "description": "Follow cross-references from or to an address, automatically traversing\n    multiple hops. 'forward' follows xrefs-from, 'backward' follows xrefs-to.\n    Returns nodes (with function name, instruction, code/data classification) and\n    edges. Do not use for call graph traversal \u2014 use callgraph for that.",
+    "description": "Follow cross-references from or to an address, automatically traversing\nmultiple hops. 'forward' follows xrefs-from, 'backward' follows xrefs-to.\nReturns nodes (with function name, instruction, code/data classification) and\nedges. Do not use for call graph traversal \u2014 use callgraph for that.",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -3319,7 +4906,7 @@
   },
   {
     "name": "make_signature",
-    "description": "Create unique byte signatures for addresses.",
+    "description": "Create unique byte signatures for addresses. Generates the shortest\nunique signature starting at each address by walking instructions and\nwildcarding operands. Useful for finding stable patterns that survive\nrecompilation.",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -3335,30 +4922,76 @@
               "type": "string"
             }
           ],
-          "description": "Address(es) or name(s)"
+          "description": "Address(es) or name(s) to create unique signatures for (e.g. '0x401000', 'main', or ['0x401000', 'sub_402000'])"
         },
         "format": {
           "type": "string",
-          "description": "Output format: 'ida', 'x64dbg', 'mask', or 'bitmask'"
+          "description": "Output format: 'ida' (default), 'x64dbg', 'mask', or 'bitmask'"
         },
         "wildcard_operands": {
           "type": "boolean",
-          "description": "Wildcard relocatable instruction operands"
+          "description": "Wildcard instruction operands for relocatable signatures (default: true)"
         },
         "max_length": {
           "type": "integer",
-          "description": "Maximum signature length in bytes"
+          "description": "Maximum signature length in bytes before giving up (default: 1000)"
         }
       },
       "required": [
         "addrs"
-      ],
-      "additionalProperties": false
+      ]
+    },
+    "outputSchema": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "query": {
+            "type": "string"
+          },
+          "addr": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "signature": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "format": {
+            "type": "string"
+          },
+          "unique": {
+            "type": "boolean"
+          },
+          "error": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "query",
+          "addr",
+          "signature",
+          "format"
+        ],
+        "additionalProperties": false
+      }
     }
   },
   {
     "name": "make_signature_for_function",
-    "description": "Create unique byte signatures for function entry points.",
+    "description": "Create unique byte signatures for function entry points. Resolves each\nname/address to a function, then generates the shortest unique signature\nstarting at the function start.",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -3374,60 +5007,157 @@
               "type": "string"
             }
           ],
-          "description": "Function address(es) or name(s)"
+          "description": "Function address(es) or name(s) to create signatures for (e.g. 'main', '0x401000', or ['main', 'sub_402000'])"
         },
         "format": {
           "type": "string",
-          "description": "Output format: 'ida', 'x64dbg', 'mask', or 'bitmask'"
+          "description": "Output format: 'ida' (default), 'x64dbg', 'mask', or 'bitmask'"
         },
         "wildcard_operands": {
           "type": "boolean",
-          "description": "Wildcard relocatable instruction operands"
+          "description": "Wildcard instruction operands for relocatable signatures (default: true)"
         },
         "max_length": {
           "type": "integer",
-          "description": "Maximum signature length in bytes"
+          "description": "Maximum signature length in bytes before giving up (default: 1000)"
         }
       },
       "required": [
         "addrs"
-      ],
-      "additionalProperties": false
+      ]
+    },
+    "outputSchema": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "query": {
+            "type": "string"
+          },
+          "addr": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "signature": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "format": {
+            "type": "string"
+          },
+          "error": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "query",
+          "addr",
+          "name",
+          "signature",
+          "format"
+        ],
+        "additionalProperties": false
+      }
     }
   },
   {
     "name": "make_signature_for_range",
-    "description": "Create a byte signature for an explicit address range.",
+    "description": "Create a byte signature for a specific address range (e.g. a selected\nregion). Unlike make_signature, this does NOT guarantee uniqueness \u2014 it\nsimply encodes the bytes in the range with optional operand wildcarding.",
     "inputSchema": {
       "type": "object",
       "properties": {
         "start": {
           "type": "string",
-          "description": "Start address or name"
+          "description": "Start address or name (e.g. '0x401000')"
         },
         "end": {
           "type": "string",
-          "description": "End address or name, exclusive"
+          "description": "End address or name (exclusive, e.g. '0x401020')"
         },
         "format": {
           "type": "string",
-          "description": "Output format: 'ida', 'x64dbg', 'mask', or 'bitmask'"
+          "description": "Output format: 'ida' (default), 'x64dbg', 'mask', or 'bitmask'"
         },
         "wildcard_operands": {
           "type": "boolean",
-          "description": "Wildcard relocatable instruction operands"
+          "description": "Wildcard instruction operands for relocatable signatures (default: true)"
         }
       },
       "required": [
         "start",
         "end"
+      ]
+    },
+    "outputSchema": {
+      "type": "object",
+      "properties": {
+        "query": {
+          "type": "string"
+        },
+        "addr": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "signature": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "format": {
+          "type": "string"
+        },
+        "unique": {
+          "type": "boolean"
+        },
+        "error": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "query",
+        "addr",
+        "signature",
+        "format"
       ],
       "additionalProperties": false
     }
   },
   {
     "name": "find_xref_signatures",
-    "description": "Find signatures for code locations that reference an address.",
+    "description": "Find signatures for code locations that reference an address. For each\ninput address, finds all code cross-references TO it, generates a unique\nsignature at each xref site, and returns the shortest ones. Ideal for\ncreating signatures for data addresses, vtable entries, or string\nreferences that can't be signatured directly.",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -3443,711 +5173,70 @@
               "type": "string"
             }
           ],
-          "description": "Address(es) or name(s) referenced by code"
+          "description": "Address(es) or name(s) to find XREF signatures for (e.g. a data address referenced by code)"
         },
         "format": {
           "type": "string",
-          "description": "Output format: 'ida', 'x64dbg', 'mask', or 'bitmask'"
+          "description": "Output format: 'ida' (default), 'x64dbg', 'mask', or 'bitmask'"
         },
         "top": {
           "type": "integer",
-          "description": "Number of shortest signatures per address"
+          "description": "Number of shortest signatures to return per address (default: 5)"
         },
         "max_length": {
           "type": "integer",
-          "description": "Maximum signature length in bytes"
+          "description": "Maximum signature length in bytes (default: 250)"
         }
       },
       "required": [
         "addrs"
-      ],
-      "additionalProperties": false
-    }
-  },
-  {
-    "name": "type_query",
-    "description": "Query local types with structured filters and pagination.",
-    "inputSchema": {
-      "type": "object",
-      "properties": {
-        "queries": {
-          "anyOf": [
-            {
-              "type": "array",
-              "items": {
-                "type": "object",
-                "properties": {
-                  "filter": {
-                    "type": "string",
-                    "description": "Name glob/regex"
-                  },
-                  "kind": {
-                    "type": "string",
-                    "description": "any|struct|union|enum|typedef|func|ptr|udt"
-                  },
-                  "offset": {
-                    "type": "integer",
-                    "description": "Start index"
-                  },
-                  "count": {
-                    "type": "integer",
-                    "description": "Maximum result count, 0 for all"
-                  },
-                  "sort_by": {
-                    "type": "string",
-                    "description": "name|size|ordinal"
-                  },
-                  "descending": {
-                    "type": "boolean",
-                    "description": "Sort descending"
-                  },
-                  "include_decl": {
-                    "type": "boolean",
-                    "description": "Include declaration text"
-                  },
-                  "include_members": {
-                    "type": "boolean",
-                    "description": "Include UDT member details"
-                  },
-                  "max_members": {
-                    "type": "integer",
-                    "description": "Maximum members per UDT"
-                  },
-                  "include_relationships": {
-                    "type": "boolean",
-                    "description": "Include related type names"
-                  }
-                },
-                "required": [],
-                "additionalProperties": false
-              }
-            },
-            {
-              "type": "object",
-              "properties": {
-                "filter": {
-                  "type": "string",
-                  "description": "Name glob/regex"
-                },
-                "kind": {
-                  "type": "string",
-                  "description": "any|struct|union|enum|typedef|func|ptr|udt"
-                },
-                "offset": {
-                  "type": "integer",
-                  "description": "Start index"
-                },
-                "count": {
-                  "type": "integer",
-                  "description": "Maximum result count, 0 for all"
-                },
-                "sort_by": {
-                  "type": "string",
-                  "description": "name|size|ordinal"
-                },
-                "descending": {
-                  "type": "boolean",
-                  "description": "Sort descending"
-                },
-                "include_decl": {
-                  "type": "boolean",
-                  "description": "Include declaration text"
-                },
-                "include_members": {
-                  "type": "boolean",
-                  "description": "Include UDT member details"
-                },
-                "max_members": {
-                  "type": "integer",
-                  "description": "Maximum members per UDT"
-                },
-                "include_relationships": {
-                  "type": "boolean",
-                  "description": "Include related type names"
-                }
-              },
-              "required": [],
-              "additionalProperties": false
-            }
-          ],
-          "description": "Type query or queries"
-        }
-      },
-      "required": [
-        "queries"
-      ],
-      "additionalProperties": false
-    }
-  },
-  {
-    "name": "type_inspect",
-    "description": "Inspect named types with size, declaration, and optional member layout.",
-    "inputSchema": {
-      "type": "object",
-      "properties": {
-        "queries": {
-          "anyOf": [
-            {
-              "type": "array",
-              "items": {
-                "type": "object",
-                "properties": {
-                  "name": {
-                    "type": "string",
-                    "description": "Type name"
-                  },
-                  "include_members": {
-                    "type": "boolean",
-                    "description": "Include UDT member details"
-                  },
-                  "max_members": {
-                    "type": "integer",
-                    "description": "Maximum member count"
-                  }
-                },
-                "required": [
-                  "name"
-                ],
-                "additionalProperties": false
-              }
-            },
-            {
-              "type": "object",
-              "properties": {
-                "name": {
-                  "type": "string",
-                  "description": "Type name"
-                },
-                "include_members": {
-                  "type": "boolean",
-                  "description": "Include UDT member details"
-                },
-                "max_members": {
-                  "type": "integer",
-                  "description": "Maximum member count"
-                }
-              },
-              "required": [
-                "name"
-              ],
-              "additionalProperties": false
-            }
-          ],
-          "description": "Type inspection query or queries"
-        }
-      },
-      "required": [
-        "queries"
-      ],
-      "additionalProperties": false
-    }
-  },
-  {
-    "name": "type_apply_batch",
-    "description": "Apply multiple type edits and return aggregate status.",
-    "inputSchema": {
-      "type": "object",
-      "properties": {
-        "batch": {
-          "type": "object",
-          "properties": {
-            "edits": {
-              "anyOf": [
-                {
-                  "type": "array",
-                  "items": {
-                    "type": "object",
-                    "properties": {
-                      "addr": {
-                        "type": "string",
-                        "description": "Memory/function address"
-                      },
-                      "name": {
-                        "type": "string",
-                        "description": "Variable/function/global name"
-                      },
-                      "ty": {
-                        "type": "string",
-                        "description": "Type name or declaration"
-                      },
-                      "type": {
-                        "type": "string",
-                        "description": "Type name or declaration alias"
-                      },
-                      "decl": {
-                        "type": "string",
-                        "description": "Type declaration alias"
-                      },
-                      "declaration": {
-                        "type": "string",
-                        "description": "Type declaration alias"
-                      },
-                      "kind": {
-                        "type": "string",
-                        "description": "function|global|local|stack"
-                      },
-                      "signature": {
-                        "type": "string",
-                        "description": "Function signature"
-                      },
-                      "variable": {
-                        "type": "string",
-                        "description": "Local variable name"
-                      }
-                    },
-                    "required": [],
-                    "additionalProperties": false
-                  }
-                },
-                {
-                  "type": "object",
-                  "properties": {
-                    "addr": {
-                      "type": "string",
-                      "description": "Memory/function address"
-                    },
-                    "name": {
-                      "type": "string",
-                      "description": "Variable/function/global name"
-                    },
-                    "ty": {
-                      "type": "string",
-                      "description": "Type name or declaration"
-                    },
-                    "type": {
-                      "type": "string",
-                      "description": "Type name or declaration alias"
-                    },
-                    "decl": {
-                      "type": "string",
-                      "description": "Type declaration alias"
-                    },
-                    "declaration": {
-                      "type": "string",
-                      "description": "Type declaration alias"
-                    },
-                    "kind": {
-                      "type": "string",
-                      "description": "function|global|local|stack"
-                    },
-                    "signature": {
-                      "type": "string",
-                      "description": "Function signature"
-                    },
-                    "variable": {
-                      "type": "string",
-                      "description": "Local variable name"
-                    }
-                  },
-                  "required": [],
-                  "additionalProperties": false
-                }
-              ],
-              "description": "Type edits to apply"
-            },
-            "stop_on_error": {
-              "type": "boolean",
-              "description": "Stop on first failed edit"
-            }
+      ]
+    },
+    "outputSchema": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "query": {
+            "type": "string"
           },
-          "required": [
-            "edits"
-          ],
-          "additionalProperties": false
-        }
-      },
-      "required": [
-        "batch"
-      ],
-      "additionalProperties": false
-    }
-  },
-  {
-    "name": "entity_query",
-    "description": "Query IDB entities with filtering, projection, and pagination.",
-    "inputSchema": {
-      "type": "object",
-      "properties": {
-        "queries": {
-          "anyOf": [
-            {
-              "type": "array",
-              "items": {
-                "type": "object",
-                "properties": {
-                  "kind": {
-                    "type": "string",
-                    "description": "functions|globals|imports|strings|names"
-                  },
-                  "filter": {
-                    "type": "string",
-                    "description": "Glob/regex filter"
-                  },
-                  "regex": {
-                    "type": "string",
-                    "description": "Regex on primary text field"
-                  },
-                  "min_addr": {
-                    "type": "string",
-                    "description": "Minimum address bound"
-                  },
-                  "max_addr": {
-                    "type": "string",
-                    "description": "Maximum address bound"
-                  },
-                  "segment": {
-                    "type": "string",
-                    "description": "Segment filter"
-                  },
-                  "module": {
-                    "type": "string",
-                    "description": "Import module filter"
-                  },
-                  "offset": {
-                    "type": "integer",
-                    "description": "Start index"
-                  },
-                  "count": {
-                    "type": "integer",
-                    "description": "Maximum result count, 0 for all"
-                  },
-                  "sort_by": {
-                    "type": "string",
-                    "description": "addr|name|size|length"
-                  },
-                  "descending": {
-                    "type": "boolean",
-                    "description": "Sort descending"
-                  },
-                  "fields": {
-                    "type": "array",
-                    "items": {
-                      "type": "string"
-                    },
-                    "description": "Projection field list"
-                  }
-                },
-                "required": [
-                  "kind"
-                ],
-                "additionalProperties": false
+          "addr": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
               }
-            },
-            {
-              "type": "object",
-              "properties": {
-                "kind": {
-                  "type": "string",
-                  "description": "functions|globals|imports|strings|names"
-                },
-                "filter": {
-                  "type": "string",
-                  "description": "Glob/regex filter"
-                },
-                "regex": {
-                  "type": "string",
-                  "description": "Regex on primary text field"
-                },
-                "min_addr": {
-                  "type": "string",
-                  "description": "Minimum address bound"
-                },
-                "max_addr": {
-                  "type": "string",
-                  "description": "Maximum address bound"
-                },
-                "segment": {
-                  "type": "string",
-                  "description": "Segment filter"
-                },
-                "module": {
-                  "type": "string",
-                  "description": "Import module filter"
-                },
-                "offset": {
-                  "type": "integer",
-                  "description": "Start index"
-                },
-                "count": {
-                  "type": "integer",
-                  "description": "Maximum result count, 0 for all"
-                },
-                "sort_by": {
-                  "type": "string",
-                  "description": "addr|name|size|length"
-                },
-                "descending": {
-                  "type": "boolean",
-                  "description": "Sort descending"
-                },
-                "fields": {
-                  "type": "array",
-                  "items": {
-                    "type": "string"
-                  },
-                  "description": "Projection field list"
+            ]
+          },
+          "signatures": {
+            "anyOf": [
+              {
+                "type": "array",
+                "items": {
+                  "type": "object"
                 }
               },
-              "required": [
-                "kind"
-              ],
-              "additionalProperties": false
-            }
-          ],
-          "description": "Entity query or queries"
-        }
-      },
-      "required": [
-        "queries"
-      ],
-      "additionalProperties": false
-    }
-  },
-  {
-    "name": "search_text",
-    "description": "Search rendered listing text using IDA native text search.",
-    "inputSchema": {
-      "type": "object",
-      "properties": {
-        "pattern": {
-          "type": "string",
-          "description": "Text or regex pattern to search"
-        },
-        "limit": {
-          "type": "integer",
-          "description": "Maximum hits per page"
-        },
-        "start": {
-          "type": "string",
-          "description": "Lower bound or cursor address to resume from"
-        },
-        "end": {
-          "type": "string",
-          "description": "Upper bound address, exclusive"
-        },
-        "regex": {
-          "type": "boolean",
-          "description": "Treat pattern as regex"
-        },
-        "case_sensitive": {
-          "type": "boolean",
-          "description": "Case-sensitive match"
-        },
-        "include": {
-          "type": "string",
-          "description": "'disasm', 'comments', or 'all'"
-        },
-        "code_only": {
-          "type": "boolean",
-          "description": "Restrict search to executable segments"
-        }
-      },
-      "required": [
-        "pattern"
-      ],
-      "additionalProperties": false
-    }
-  },
-  {
-    "name": "py_exec_file",
-    "description": "Execute a Python script file in IDA context.",
-    "inputSchema": {
-      "type": "object",
-      "properties": {
-        "file_path": {
-          "type": "string",
-          "description": "Absolute path to a Python script"
-        }
-      },
-      "required": [
-        "file_path"
-      ],
-      "additionalProperties": false
-    }
-  },
-  {
-    "name": "dbg_status",
-    "description": "Return debugger lifecycle state and current IP if suspended.",
-    "inputSchema": {
-      "type": "object",
-      "properties": {},
-      "required": [],
-      "additionalProperties": false
-    }
-  },
-  {
-    "name": "dbg_set_bp_condition",
-    "description": "Set or clear breakpoint conditions in batch.",
-    "inputSchema": {
-      "type": "object",
-      "properties": {
-        "items": {
-          "anyOf": [
-            {
-              "type": "array",
-              "items": {
-                "type": "object",
-                "properties": {
-                  "addr": {
-                    "type": "string",
-                    "description": "Breakpoint address"
-                  },
-                  "condition": {
-                    "anyOf": [
-                      {
-                        "type": "string"
-                      },
-                      {
-                        "type": "null"
-                      }
-                    ],
-                    "description": "Condition expression; null/empty clears it"
-                  },
-                  "language": {
-                    "anyOf": [
-                      {
-                        "type": "string"
-                      },
-                      {
-                        "type": "null"
-                      }
-                    ],
-                    "description": "Condition language, e.g. 'idc' or 'python'"
-                  },
-                  "low_level": {
-                    "type": "boolean",
-                    "description": "Use low-level/server-side condition"
-                  }
-                },
-                "required": [
-                  "addr"
-                ],
-                "additionalProperties": false
+              {
+                "type": "null"
               }
-            },
-            {
-              "type": "object",
-              "properties": {
-                "addr": {
-                  "type": "string",
-                  "description": "Breakpoint address"
-                },
-                "condition": {
-                  "anyOf": [
-                    {
-                      "type": "string"
-                    },
-                    {
-                      "type": "null"
-                    }
-                  ],
-                  "description": "Condition expression; null/empty clears it"
-                },
-                "language": {
-                  "anyOf": [
-                    {
-                      "type": "string"
-                    },
-                    {
-                      "type": "null"
-                    }
-                  ],
-                  "description": "Condition language, e.g. 'idc' or 'python'"
-                },
-                "low_level": {
-                  "type": "boolean",
-                  "description": "Use low-level/server-side condition"
-                }
-              },
-              "required": [
-                "addr"
-              ],
-              "additionalProperties": false
-            }
-          ],
-          "description": "Breakpoint condition operation(s)"
-        }
-      },
-      "required": [
-        "items"
-      ],
-      "additionalProperties": false
-    }
-  },
-  {
-    "name": "dbg_gpregs",
-    "description": "Get general-purpose registers for the current thread.",
-    "inputSchema": {
-      "type": "object",
-      "properties": {},
-      "required": [],
-      "additionalProperties": false
-    }
-  },
-  {
-    "name": "dbg_gpregs_remote",
-    "description": "Get general-purpose registers for specified thread IDs.",
-    "inputSchema": {
-      "type": "object",
-      "properties": {
-        "tids": {
-          "anyOf": [
-            {
-              "type": "array",
-              "items": {
-                "type": "integer"
-              }
-            },
-            {
-              "type": "integer"
-            }
-          ],
-          "description": "Thread ID(s)"
-        }
-      },
-      "required": [
-        "tids"
-      ],
-      "additionalProperties": false
-    }
-  },
-  {
-    "name": "dbg_regs_named",
-    "description": "Get selected registers for the current thread.",
-    "inputSchema": {
-      "type": "object",
-      "properties": {
-        "register_names": {
-          "type": "string",
-          "description": "Comma-separated register names, e.g. 'RAX,RBX'"
-        }
-      },
-      "required": [
-        "register_names"
-      ],
-      "additionalProperties": false
-    }
-  },
-  {
-    "name": "dbg_regs_named_remote",
-    "description": "Get selected registers for a specific thread ID.",
-    "inputSchema": {
-      "type": "object",
-      "properties": {
-        "thread_id": {
-          "type": "integer",
-          "description": "Thread ID"
+            ]
+          },
+          "total_xrefs": {
+            "type": "integer"
+          },
+          "error": {
+            "type": "string"
+          }
         },
-        "register_names": {
-          "type": "string",
-          "description": "Comma-separated register names, e.g. 'RAX,RBX'"
-        }
-      },
-      "required": [
-        "thread_id",
-        "register_names"
-      ],
-      "additionalProperties": false
+        "required": [
+          "query",
+          "addr",
+          "signatures"
+        ],
+        "additionalProperties": false
+      }
     }
   }
 ]

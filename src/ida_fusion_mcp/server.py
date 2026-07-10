@@ -13,9 +13,10 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
+from . import __version__
 from .vendor.zeromcp import McpServer
 from .registry import InstanceRegistry
-from .router import InstanceRouter
+from .router import IDA_BACKEND_MCP_PATH, InstanceRouter
 from .health import cleanup_stale_instances, rediscover_instances
 from .idalib_manager import IdalibManager
 from .tools import management, idalib as idalib_tools
@@ -446,7 +447,7 @@ class IdaFusionMcpServer:
         """
         self.registry = InstanceRegistry(registry_path)
         self.router = InstanceRouter(self.registry)
-        self.server = McpServer("ida-fusion-mcp", version="1.0.0")
+        self.server = McpServer("ida-fusion-mcp", version=__version__)
 
         # idalib lifecycle manager
         self.idalib_manager = IdalibManager(self.registry, python_executable=idalib_python)
@@ -1243,6 +1244,7 @@ class IdaFusionMcpServer:
         if host not in ALLOWED_HOSTS:
             return []
 
+        conn: http.client.HTTPConnection | None = None
         try:
             conn = http.client.HTTPConnection(host, port, timeout=10.0)
             request_body = json.dumps({
@@ -1250,10 +1252,14 @@ class IdaFusionMcpServer:
                 "method": "tools/list",
                 "id": 1
             })
-            conn.request("POST", "/mcp", request_body, {"Content-Type": "application/json"})
+            conn.request(
+                "POST",
+                IDA_BACKEND_MCP_PATH,
+                request_body,
+                {"Content-Type": "application/json"},
+            )
             response = conn.getresponse()
             response_data = json.loads(response.read().decode())
-            conn.close()
 
             if "result" in response_data:
                 tools = response_data["result"].get("tools", [])
@@ -1262,8 +1268,18 @@ class IdaFusionMcpServer:
                 return []
 
         except Exception as e:
-            print(f"[ida-fusion-mcp] Failed to discover tools from instance: {e}", file=sys.stderr)
+            print(
+                "[ida-fusion-mcp] Failed to discover tools from instance: "
+                f"{type(e).__name__}",
+                file=sys.stderr,
+            )
             return []
+        finally:
+            if conn is not None:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
 
     def run(self):
         """Run the MCP server with stdio transport."""

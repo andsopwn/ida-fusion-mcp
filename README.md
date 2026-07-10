@@ -4,6 +4,11 @@
 
 The goal is straightforward: one MCP endpoint for reverse-engineering work that spans more than one IDA database. Your AI client keeps one stable server config, and each tool call is routed to the correct IDA Pro GUI instance or headless `idalib` worker by `instance_id`.
 
+> **v0.1.1 stabilization candidate:** fixes synchronization, installer safety,
+> debugger routing/schema parity, macOS detection, and selected correctness
+> issues. It is a local candidate only; no tag, package, or public release has
+> been published.
+
 The project combines three things that are usually separate:
 
 - multi-binary routing for loaders, payloads, plugins, services, and shared libraries;
@@ -46,7 +51,10 @@ The recent port from `ida-pro-mcp` adds these higher-level capabilities:
 | Type catalog | `type_query`, `type_inspect`, `type_apply_batch` |
 | Unified search | `entity_query`, `search_text` |
 | IDAPython file execution | `py_exec_file` |
-| Debugger helpers | `dbg_status`, `dbg_set_bp_condition`, `dbg_gpregs`, `dbg_gpregs_remote`, `dbg_regs_named`, `dbg_regs_named_remote` |
+| Debugger control | `dbg_start`, `dbg_status`, `dbg_exit`, `dbg_continue`, `dbg_run_to`, `dbg_step_into`, `dbg_step_over` |
+| Breakpoints | `dbg_bps`, `dbg_add_bp`, `dbg_delete_bp`, `dbg_toggle_bp`, `dbg_set_bp_condition` |
+| Registers and stack | `dbg_regs_all`, `dbg_regs`, `dbg_regs_remote`, `dbg_gpregs`, `dbg_gpregs_remote`, `dbg_regs_named`, `dbg_regs_named_remote`, `dbg_stacktrace` |
+| Debugger memory | `dbg_read`, `dbg_write` |
 
 Router-level tools add multi-instance operations:
 
@@ -97,10 +105,8 @@ The legacy `ida-multi-mcp` console command is still provided as an alias. New co
 | GUI plugin | IDA Pro/Home 8.3+ | IDA's matching Python, server on 3.11+ | none |
 | Managed headless | IDA Pro 9.x with `libidalib` | server/worker on 3.11+ | `ida-fusion-mcp[idalib]` |
 
-Baseline verification covers the local IDA Pro 9.3 GUI on macOS arm64 and its
-application-bundle layout. Post-change GUI routing remains pending until a real
-restart passes, and live headless support remains pending until the licensed
-`idapro` probe and managed-session check both pass.
+Post-change v0.1.1 GUI routing and managed idalib are verified with IDA Pro 9.3
+on macOS arm64, including a real GUI restart and managed-session lifecycle.
 
 ### macOS
 
@@ -227,12 +233,21 @@ The router does not own IDA analysis state. It validates the requested `instance
 
 ## Operational Notes
 
-- The installed IDA loader is named `ida_fusion_mcp.py`.
+- The installed IDA loader is named `ida_fusion_mcp_loader.py` so it does not
+  shadow the `ida_fusion_mcp` package when IDA imports plugins by filename.
 - The implementation module remains `ida_fusion_mcp`.
 - The registry lives under `~/.ida-mcp/` by default.
 - GUI instances send heartbeats; stale entries are cleaned up.
 - If an IDA window opens a different input file, the old instance expires and a new ID is registered.
-- Debugger extension tools are available from the IDA-side MCP server with the debugger extension enabled; router schemas expose the callable tool names to clients.
+- The stdio router advertises debugger tools normally and internally enables
+  the IDA backend's `dbg` extension for discovery and invocation. Clients pass
+  only `instance_id`; unsafe-tool configuration and debugger-state checks stay
+  enforced by the backend.
+- `py_eval` and `py_exec_file` are unsafe, in-process code-execution tools. Their
+  reduced builtins/import surface is defense in depth, not containment; disable
+  them in the IDA MCP tool configuration unless the workflow requires them.
+  Managed idalib workers omit `@unsafe` tools unless opened with `unsafe=true`;
+  the GUI plugin retains its existing enabled-tool defaults for compatibility.
 
 ## Troubleshooting
 
@@ -241,13 +256,13 @@ The router does not own IDA analysis state. It validates the requested `instance
 Check that the loader exists:
 
 ```bash
-ls ~/.idapro/plugins/ida_fusion_mcp.py
+ls ~/.idapro/plugins/ida_fusion_mcp_loader.py
 ```
 
 On Windows:
 
 ```powershell
-Get-Item "$env:APPDATA\Hex-Rays\IDA Pro\plugins\ida_fusion_mcp.py"
+Get-Item "$env:APPDATA\Hex-Rays\IDA Pro\plugins\ida_fusion_mcp_loader.py"
 ```
 
 If IDA reports `No module named 'ida_fusion_mcp'`, install the package with the Python version used by IDA. If IDA itself is using Python older than 3.11, switch IDA to a supported Python build with `idapyswitch`.
@@ -279,8 +294,9 @@ git clone https://github.com/andsopwn/ida-fusion-mcp.git
 cd ida-fusion-mcp
 python -m venv .venv
 . .venv/bin/activate
-python -m pip install -e ".[dev]"
-python -m pytest -q
+python -m pip install -e .
+python -m compileall -q src
+python -m ida_fusion_mcp --config
 ```
 
 The public package exposes both commands:

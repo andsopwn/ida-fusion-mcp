@@ -13,6 +13,9 @@ from .registry import InstanceRegistry, ALLOWED_HOSTS
 from .health import query_binary_metadata
 
 
+IDA_BACKEND_MCP_PATH = "/mcp?ext=dbg"
+
+
 class InstanceRouter:
     """Routes MCP tool requests to IDA instances.
 
@@ -159,6 +162,7 @@ class InstanceRouter:
         if host not in ALLOWED_HOSTS:
             return {"error": "Connection refused: only localhost instances allowed"}
 
+        conn: http.client.HTTPConnection | None = None
         try:
             conn = http.client.HTTPConnection(host, port, timeout=300.0)
             request_body = json.dumps({
@@ -167,10 +171,14 @@ class InstanceRouter:
                 "params": params,
                 "id": 1
             })
-            conn.request("POST", "/mcp", request_body, {"Content-Type": "application/json"})
+            conn.request(
+                "POST",
+                IDA_BACKEND_MCP_PATH,
+                request_body,
+                {"Content-Type": "application/json"},
+            )
             response = conn.getresponse()
             response_data = json.loads(response.read().decode())
-            conn.close()
 
             # Return result or error
             if "result" in response_data:
@@ -185,6 +193,12 @@ class InstanceRouter:
             return {
                 "error": f"Failed to connect to instance: {type(e).__name__}",
             }
+        finally:
+            if conn is not None:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
 
     def _handle_expired_instance(self, instance_id: str, expired_info: dict) -> dict[str, Any]:
         """Handle request for an expired instance.

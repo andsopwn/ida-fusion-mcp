@@ -1,4 +1,5 @@
 from typing import Annotated
+import ast
 import io
 import os
 import sys
@@ -28,18 +29,53 @@ from .utils import parse_address, get_function
 # ============================================================================
 
 
-def _make_restricted_exec_globals() -> dict:
-    def lazy_import(module_name):
-        allowed_prefixes = ("ida_", "idaapi", "idautils", "idc")
-        if not any(module_name.startswith(p) for p in allowed_prefixes):
-            raise ImportError(
-                f"Module '{module_name}' is not allowed. "
-                "Only IDA modules (ida_*, idaapi, idautils, idc) are permitted."
+def _restricted_ida_import(
+    name,
+    globals=None,
+    locals=None,
+    fromlist=(),
+    level=0,
+):
+    if not isinstance(name, str):
+        raise TypeError("module name must be a string")
+    if level != 0:
+        raise ImportError("Relative imports are not allowed")
+    if not (
+        name.startswith("ida_")
+        or name in {"idaapi", "idautils", "idc"}
+    ):
+        raise ImportError(
+            f"Module '{name}' is not allowed. "
+            "Only IDA modules (ida_*, idaapi, idautils, idc) are permitted."
+        )
+    return __import__(name, globals, locals, fromlist, level)
+
+
+def _optional_ida_import(module_name):
+    try:
+        return _restricted_ida_import(module_name)
+    except ImportError:
+        return None
+
+
+def _validate_restricted_python(code: str, filename: str = "<string>") -> None:
+    """Reject direct dunder traversal before restricted code is evaluated.
+
+    This is a defense-in-depth guard for an unsafe tool, not a process sandbox.
+    """
+    tree = ast.parse(code, filename=filename, mode="exec")
+    for node in ast.walk(tree):
+        if (
+            isinstance(node, ast.Attribute)
+            and node.attr.startswith("__")
+            and node.attr.endswith("__")
+        ):
+            raise ValueError(
+                f"Access to dunder attribute '{node.attr}' is blocked"
             )
-        try:
-            return __import__(module_name)
-        except Exception:
-            return None
+
+
+def _make_restricted_exec_globals() -> dict:
 
     def _safe_getattr(obj, name, *default):
         if isinstance(name, str) and name.startswith("__") and name.endswith("__"):
@@ -71,62 +107,62 @@ def _make_restricted_exec_globals() -> dict:
         "KeyError": KeyError, "IndexError": IndexError, "AttributeError": AttributeError,
         "RuntimeError": RuntimeError, "StopIteration": StopIteration,
         "NotImplementedError": NotImplementedError, "ZeroDivisionError": ZeroDivisionError,
-        "__import__": lazy_import,
+        "__import__": _restricted_ida_import,
     }
 
     return {
         "__builtins__": _safe_builtins,
         "idaapi": idaapi,
         "idc": idc,
-        "idautils": lazy_import("idautils"),
-        "ida_allins": lazy_import("ida_allins"),
-        "ida_auto": lazy_import("ida_auto"),
-        "ida_bitrange": lazy_import("ida_bitrange"),
+        "idautils": _optional_ida_import("idautils"),
+        "ida_allins": _optional_ida_import("ida_allins"),
+        "ida_auto": _optional_ida_import("ida_auto"),
+        "ida_bitrange": _optional_ida_import("ida_bitrange"),
         "ida_bytes": ida_bytes,
         "ida_dbg": ida_dbg,
-        "ida_dirtree": lazy_import("ida_dirtree"),
-        "ida_diskio": lazy_import("ida_diskio"),
+        "ida_dirtree": _optional_ida_import("ida_dirtree"),
+        "ida_diskio": _optional_ida_import("ida_diskio"),
         "ida_entry": ida_entry,
-        "ida_expr": lazy_import("ida_expr"),
-        "ida_fixup": lazy_import("ida_fixup"),
-        "ida_fpro": lazy_import("ida_fpro"),
+        "ida_expr": _optional_ida_import("ida_expr"),
+        "ida_fixup": _optional_ida_import("ida_fixup"),
+        "ida_fpro": _optional_ida_import("ida_fpro"),
         "ida_frame": ida_frame,
         "ida_funcs": ida_funcs,
-        "ida_gdl": lazy_import("ida_gdl"),
-        "ida_graph": lazy_import("ida_graph"),
+        "ida_gdl": _optional_ida_import("ida_gdl"),
+        "ida_graph": _optional_ida_import("ida_graph"),
         "ida_hexrays": ida_hexrays,
         "ida_ida": ida_ida,
-        "ida_idd": lazy_import("ida_idd"),
-        "ida_idp": lazy_import("ida_idp"),
-        "ida_ieee": lazy_import("ida_ieee"),
+        "ida_idd": _optional_ida_import("ida_idd"),
+        "ida_idp": _optional_ida_import("ida_idp"),
+        "ida_ieee": _optional_ida_import("ida_ieee"),
         "ida_kernwin": ida_kernwin,
-        "ida_libfuncs": lazy_import("ida_libfuncs"),
+        "ida_libfuncs": _optional_ida_import("ida_libfuncs"),
         "ida_lines": ida_lines,
-        "ida_loader": lazy_import("ida_loader"),
-        "ida_merge": lazy_import("ida_merge"),
-        "ida_mergemod": lazy_import("ida_mergemod"),
-        "ida_moves": lazy_import("ida_moves"),
+        "ida_loader": _optional_ida_import("ida_loader"),
+        "ida_merge": _optional_ida_import("ida_merge"),
+        "ida_mergemod": _optional_ida_import("ida_mergemod"),
+        "ida_moves": _optional_ida_import("ida_moves"),
         "ida_nalt": ida_nalt,
         "ida_name": ida_name,
-        "ida_netnode": lazy_import("ida_netnode"),
-        "ida_offset": lazy_import("ida_offset"),
-        "ida_pro": lazy_import("ida_pro"),
-        "ida_problems": lazy_import("ida_problems"),
-        "ida_range": lazy_import("ida_range"),
-        "ida_regfinder": lazy_import("ida_regfinder"),
-        "ida_registry": lazy_import("ida_registry"),
-        "ida_search": lazy_import("ida_search"),
+        "ida_netnode": _optional_ida_import("ida_netnode"),
+        "ida_offset": _optional_ida_import("ida_offset"),
+        "ida_pro": _optional_ida_import("ida_pro"),
+        "ida_problems": _optional_ida_import("ida_problems"),
+        "ida_range": _optional_ida_import("ida_range"),
+        "ida_regfinder": _optional_ida_import("ida_regfinder"),
+        "ida_registry": _optional_ida_import("ida_registry"),
+        "ida_search": _optional_ida_import("ida_search"),
         "ida_segment": ida_segment,
-        "ida_segregs": lazy_import("ida_segregs"),
-        "ida_srclang": lazy_import("ida_srclang"),
-        "ida_strlist": lazy_import("ida_strlist"),
-        "ida_struct": lazy_import("ida_struct"),
-        "ida_tryblks": lazy_import("ida_tryblks"),
+        "ida_segregs": _optional_ida_import("ida_segregs"),
+        "ida_srclang": _optional_ida_import("ida_srclang"),
+        "ida_strlist": _optional_ida_import("ida_strlist"),
+        "ida_struct": _optional_ida_import("ida_struct"),
+        "ida_tryblks": _optional_ida_import("ida_tryblks"),
         "ida_typeinf": ida_typeinf,
-        "ida_ua": lazy_import("ida_ua"),
-        "ida_undo": lazy_import("ida_undo"),
+        "ida_ua": _optional_ida_import("ida_ua"),
+        "ida_undo": _optional_ida_import("ida_undo"),
         "ida_xref": ida_xref,
-        "ida_enum": lazy_import("ida_enum"),
+        "ida_enum": _optional_ida_import("ida_enum"),
         "parse_address": parse_address,
         "get_function": get_function,
     }
@@ -146,7 +182,8 @@ def py_eval(
     """Execute Python code in IDA context.
     Returns dict with result/stdout/stderr.
     Has access to all IDA API modules.
-    Supports Jupyter-style evaluation."""
+    Supports Jupyter-style evaluation. This unsafe tool uses defense-in-depth
+    restrictions but is not a process security sandbox."""
     # Capture stdout/stderr
     stdout_capture = io.StringIO()
     stderr_capture = io.StringIO()
@@ -156,25 +193,12 @@ def py_eval(
     try:
         sys.stdout = stdout_capture
         sys.stderr = stderr_capture
+        _validate_restricted_python(code)
 
-        # Create execution context with IDA modules (lazy import to avoid errors)
-        def lazy_import(module_name):
-            # Security: only allow IDA-related module imports
-            allowed_prefixes = ("ida_", "idaapi", "idautils", "idc")
-            if not any(module_name.startswith(p) for p in allowed_prefixes):
-                raise ImportError(
-                    f"Module '{module_name}' is not allowed in py_eval. "
-                    "Only IDA modules (ida_*, idaapi, idautils, idc) are permitted."
-                )
-            try:
-                return __import__(module_name)
-            except Exception:
-                return None
+        # Defense in depth: reduce accidental access to host-side primitives.
+        # This in-process tool is still explicitly unsafe and is not a sandbox.
 
-        # Security: restricted builtins - remove dangerous functions that enable
-        # arbitrary file/network/process access outside IDA's analysis context.
-
-        # Wrap getattr/setattr to block dunder attribute access (sandbox escape prevention)
+        # Wrap getattr/setattr to block direct dunder traversal.
         def _safe_getattr(obj, name, *default):
             if isinstance(name, str) and name.startswith("__") and name.endswith("__"):
                 raise AttributeError(f"Access to dunder attribute '{name}' is blocked in py_eval")
@@ -208,63 +232,63 @@ def py_eval(
             "KeyError": KeyError, "IndexError": IndexError, "AttributeError": AttributeError,
             "RuntimeError": RuntimeError, "StopIteration": StopIteration,
             "NotImplementedError": NotImplementedError, "ZeroDivisionError": ZeroDivisionError,
-            # Restricted import - only IDA modules allowed
-            "__import__": lazy_import,
+            # Restrict ordinary import statements to IDA modules.
+            "__import__": _restricted_ida_import,
         }
 
         exec_globals = {
             "__builtins__": _safe_builtins,
             "idaapi": idaapi,
             "idc": idc,
-            "idautils": lazy_import("idautils"),
-            "ida_allins": lazy_import("ida_allins"),
-            "ida_auto": lazy_import("ida_auto"),
-            "ida_bitrange": lazy_import("ida_bitrange"),
+            "idautils": _optional_ida_import("idautils"),
+            "ida_allins": _optional_ida_import("ida_allins"),
+            "ida_auto": _optional_ida_import("ida_auto"),
+            "ida_bitrange": _optional_ida_import("ida_bitrange"),
             "ida_bytes": ida_bytes,
             "ida_dbg": ida_dbg,
-            "ida_dirtree": lazy_import("ida_dirtree"),
-            "ida_diskio": lazy_import("ida_diskio"),
+            "ida_dirtree": _optional_ida_import("ida_dirtree"),
+            "ida_diskio": _optional_ida_import("ida_diskio"),
             "ida_entry": ida_entry,
-            "ida_expr": lazy_import("ida_expr"),
-            "ida_fixup": lazy_import("ida_fixup"),
-            "ida_fpro": lazy_import("ida_fpro"),
+            "ida_expr": _optional_ida_import("ida_expr"),
+            "ida_fixup": _optional_ida_import("ida_fixup"),
+            "ida_fpro": _optional_ida_import("ida_fpro"),
             "ida_frame": ida_frame,
             "ida_funcs": ida_funcs,
-            "ida_gdl": lazy_import("ida_gdl"),
-            "ida_graph": lazy_import("ida_graph"),
+            "ida_gdl": _optional_ida_import("ida_gdl"),
+            "ida_graph": _optional_ida_import("ida_graph"),
             "ida_hexrays": ida_hexrays,
             "ida_ida": ida_ida,
-            "ida_idd": lazy_import("ida_idd"),
-            "ida_idp": lazy_import("ida_idp"),
-            "ida_ieee": lazy_import("ida_ieee"),
+            "ida_idd": _optional_ida_import("ida_idd"),
+            "ida_idp": _optional_ida_import("ida_idp"),
+            "ida_ieee": _optional_ida_import("ida_ieee"),
             "ida_kernwin": ida_kernwin,
-            "ida_libfuncs": lazy_import("ida_libfuncs"),
+            "ida_libfuncs": _optional_ida_import("ida_libfuncs"),
             "ida_lines": ida_lines,
-            "ida_loader": lazy_import("ida_loader"),
-            "ida_merge": lazy_import("ida_merge"),
-            "ida_mergemod": lazy_import("ida_mergemod"),
-            "ida_moves": lazy_import("ida_moves"),
+            "ida_loader": _optional_ida_import("ida_loader"),
+            "ida_merge": _optional_ida_import("ida_merge"),
+            "ida_mergemod": _optional_ida_import("ida_mergemod"),
+            "ida_moves": _optional_ida_import("ida_moves"),
             "ida_nalt": ida_nalt,
             "ida_name": ida_name,
-            "ida_netnode": lazy_import("ida_netnode"),
-            "ida_offset": lazy_import("ida_offset"),
-            "ida_pro": lazy_import("ida_pro"),
-            "ida_problems": lazy_import("ida_problems"),
-            "ida_range": lazy_import("ida_range"),
-            "ida_regfinder": lazy_import("ida_regfinder"),
-            "ida_registry": lazy_import("ida_registry"),
-            "ida_search": lazy_import("ida_search"),
+            "ida_netnode": _optional_ida_import("ida_netnode"),
+            "ida_offset": _optional_ida_import("ida_offset"),
+            "ida_pro": _optional_ida_import("ida_pro"),
+            "ida_problems": _optional_ida_import("ida_problems"),
+            "ida_range": _optional_ida_import("ida_range"),
+            "ida_regfinder": _optional_ida_import("ida_regfinder"),
+            "ida_registry": _optional_ida_import("ida_registry"),
+            "ida_search": _optional_ida_import("ida_search"),
             "ida_segment": ida_segment,
-            "ida_segregs": lazy_import("ida_segregs"),
-            "ida_srclang": lazy_import("ida_srclang"),
-            "ida_strlist": lazy_import("ida_strlist"),
-            "ida_struct": lazy_import("ida_struct"),
-            "ida_tryblks": lazy_import("ida_tryblks"),
+            "ida_segregs": _optional_ida_import("ida_segregs"),
+            "ida_srclang": _optional_ida_import("ida_srclang"),
+            "ida_strlist": _optional_ida_import("ida_strlist"),
+            "ida_struct": _optional_ida_import("ida_struct"),
+            "ida_tryblks": _optional_ida_import("ida_tryblks"),
             "ida_typeinf": ida_typeinf,
-            "ida_ua": lazy_import("ida_ua"),
-            "ida_undo": lazy_import("ida_undo"),
+            "ida_ua": _optional_ida_import("ida_ua"),
+            "ida_undo": _optional_ida_import("ida_undo"),
             "ida_xref": ida_xref,
-            "ida_enum": lazy_import("ida_enum"),
+            "ida_enum": _optional_ida_import("ida_enum"),
             "parse_address": parse_address,
             "get_function": get_function,
         }
@@ -343,7 +367,11 @@ def py_eval(
 def py_exec_file(
     file_path: Annotated[str, "Absolute path to a Python script to execute"],
 ) -> dict:
-    """Execute a Python script file in IDA context."""
+    """Execute a Python script file in IDA context.
+
+    This unsafe tool uses defense-in-depth restrictions but is not a process
+    security sandbox.
+    """
     if not os.path.isfile(file_path):
         return {"result": "", "stdout": "", "stderr": f"File not found: {file_path}"}
 
@@ -364,6 +392,7 @@ def py_exec_file(
         with open(file_path, "r", encoding="utf-8") as f:
             code = f.read()
 
+        _validate_restricted_python(code, filename=file_path)
         exec(compile(code, file_path, "exec"), exec_globals)
 
         result_value = ""

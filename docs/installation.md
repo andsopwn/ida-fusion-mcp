@@ -13,9 +13,8 @@ Authority note: this document is operational guidance and must not redefine cont
 | GUI plugin | IDA Pro/Home 8.3+ | IDA's matching Python, server on 3.11+ | none |
 | Managed headless | IDA Pro 9.x with `libidalib` | server/worker on 3.11+ | `ida-fusion-mcp[idalib]` |
 
-Baseline verification covers the local IDA Pro 9.3 GUI on macOS arm64 and its
-application-bundle layout. Post-change GUI restart confirmation and live
-managed idalib remain pending.
+Post-change v0.1.1 GUI routing and managed idalib are verified with IDA Pro 9.3
+on macOS arm64, including a real GUI restart and managed-session lifecycle.
 
 ## Important: IDA Python Version Mismatch
 
@@ -219,7 +218,7 @@ ida-fusion-mcp --config
 
 ## Verify
 
-1. Open IDA Pro with any binary — the plugin auto-loads (PLUGIN_FIX)
+1. Open IDA Pro with any binary — the plugin auto-loads.
 2. Check the IDA console for: `[ida-fusion-mcp] Registered as instance 'xxxx'`
 3. Run: `ida-fusion-mcp --list` to confirm the instance is visible
 4. In your MCP client, try calling `list_instances()` tool
@@ -243,17 +242,17 @@ Pass criteria:
 
 macOS/Linux default per-user directory:
 ```bash
-ls -l ~/.idapro/plugins/ida_fusion_mcp.py
+ls -l ~/.idapro/plugins/ida_fusion_mcp_loader.py
 ```
 
 macOS explicit application-bundle directory:
 ```bash
-ls -l "/Applications/IDA Professional 9.3.app/Contents/MacOS/plugins/ida_fusion_mcp.py"
+ls -l "/Applications/IDA Professional 9.3.app/Contents/MacOS/plugins/ida_fusion_mcp_loader.py"
 ```
 
 Windows (PowerShell):
 ```powershell
-Get-Item "$env:APPDATA\\Hex-Rays\\IDA Pro\\plugins\\ida_fusion_mcp.py"
+Get-Item "$env:APPDATA\\Hex-Rays\\IDA Pro\\plugins\\ida_fusion_mcp_loader.py"
 ```
 
 Pass criteria:
@@ -306,7 +305,13 @@ If post-flight checks fail, apply fixes in order.
 
 ### "No module named 'ida_fusion_mcp.plugin'" in IDA
 
-This means IDA's Python cannot find the installed package. The most common cause is **Python version mismatch**.
+If the message also says `'ida_fusion_mcp' is not a package`, an historical
+`ida_fusion_mcp.py` loader is shadowing the installed package. Run
+`ida-fusion-mcp --install` again so the bootstrap is replaced by
+`ida_fusion_mcp_loader.py`, then restart IDA.
+
+Otherwise, IDA's Python cannot find the installed package. The most common
+cause is **Python version mismatch**.
 
 1. Check IDA's Python version in the IDA console:
    ```
@@ -337,7 +342,8 @@ independent project.
 ## Uninstallation
 
 `ida-fusion-mcp --uninstall` removes only the `ida-fusion-mcp` client entries,
-the `ida_fusion_mcp.py` loader, the owned legacy `ida_multi_mcp.py` loader, and
+the `ida_fusion_mcp_loader.py` loader, the shadowing historical
+`ida_fusion_mcp.py` loader, the owned legacy `ida_multi_mcp.py` loader, and
 fusion's registry files. Independent ida-pro-mcp client entries and loaders are
 preserved.
 

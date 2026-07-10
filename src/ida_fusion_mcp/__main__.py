@@ -1176,14 +1176,19 @@ def cmd_install(args):
         print(f"\n  Creating IDA plugins directory: {ida_plugins_dir}")
         ida_plugins_dir.mkdir(parents=True, exist_ok=True)
 
-    # Copy the loader file as ida_fusion_mcp.py into IDA's plugins directory.
-    # Also clean the legacy ida_multi_mcp.py loader to avoid duplicate plugin entries.
+    # Keep the loader module name distinct from the ida_fusion_mcp package.
+    # IDA imports plugins by filename, so ida_fusion_mcp.py would shadow the
+    # package that the loader needs to import. Clean both historical names only
+    # after the replacement loader has been placed successfully.
     loader_source = Path(__file__).parent / "plugin" / "ida_fusion_mcp_loader.py"
-    loader_dest = ida_plugins_dir / "ida_fusion_mcp.py"
-    legacy_loader_dest = ida_plugins_dir / "ida_multi_mcp.py"
-    if legacy_loader_dest.exists() or legacy_loader_dest.is_symlink():
-        legacy_loader_dest.unlink()
-
+    if not loader_source.is_file():
+        print(f"\n  [!!] IDA plugin loader source is missing: {loader_source}")
+        return 1
+    loader_dest = ida_plugins_dir / "ida_fusion_mcp_loader.py"
+    legacy_loader_dests = (
+        ida_plugins_dir / "ida_fusion_mcp.py",
+        ida_plugins_dir / "ida_multi_mcp.py",
+    )
     # Try symlink first (development-friendly), fall back to copy
     # Use a temporary name + rename to avoid TOCTOU race between unlink/symlink
     import tempfile
@@ -1214,6 +1219,10 @@ def cmd_install(args):
                 os.unlink(loader_tmp)
             except OSError:
                 pass
+
+    for legacy_loader_dest in legacy_loader_dests:
+        if legacy_loader_dest.exists() or legacy_loader_dest.is_symlink():
+            legacy_loader_dest.unlink()
 
     print("\n  [ok] IDA plugin installed!")
 
@@ -1250,7 +1259,11 @@ def cmd_uninstall(args):
     # 1. Remove IDA plugin
     ida_plugins_dir = _get_ida_plugins_dir(normalized_ida_dir)
     removed_any_plugin = False
-    for loader_dest in (ida_plugins_dir / "ida_fusion_mcp.py", ida_plugins_dir / "ida_multi_mcp.py"):
+    for loader_dest in (
+        ida_plugins_dir / "ida_fusion_mcp_loader.py",
+        ida_plugins_dir / "ida_fusion_mcp.py",
+        ida_plugins_dir / "ida_multi_mcp.py",
+    ):
         if loader_dest.exists() or loader_dest.is_symlink():
             loader_dest.unlink()
             removed_any_plugin = True

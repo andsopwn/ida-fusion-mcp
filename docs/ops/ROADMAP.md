@@ -1,20 +1,22 @@
 # Roadmap
 
-Last updated: 2026-02-17
+Last updated: 2026-07-10
 Status: Active
 
-## Scope Synchronization
-This roadmap does not redefine `docs/.ssot/PRD.md` or `docs/.ssot/contracts/*`; it only manages execution priorities.
+## Current: v0.1.1 stabilization
 
-## Near-term (Now)
-1. Close P0/P1 stability issues together with contracts and tests.
-2. Regularly review the governance gates (SSOT precedence, consistency, absolute-date, traceability).
-3. Automate the doc-code consistency verification routine (pre-release).
+- Fix IDA main-thread batch restoration, reentrancy, and native cancellation.
+- Preserve independent MCP client/plugin configuration during install and uninstall.
+- Restore debugger extension routing and synchronize all 92 IDA tool schemas.
+- Finish selected API, transport, macOS, and idalib correctness hardening.
+- Keep publication blocked until license provenance is confirmed.
 
-## Mid-term
-1. Formalize contract versioning (compatible/incompatible) operational procedures.
-2. Split decision records (ADRs) into finer units and strengthen history linkage.
-3. Consider turning operational diagnostics (pre/post-install auto-diagnosis) into actual automated scripts.
+## Next: v0.2.0 function similarity
 
-## N/A
-- Runbook: N/A (no on-call/service operation model at this time)
+- Add local function features, fingerprints, tokens, indexing, and comparisons.
+- Keep neural/model-based recall optional; do not add base model downloads.
+
+## Follow-up stabilization
+
+- Remaining upstream performance work, CI/test policy, package metadata, and release hygiene.
+- Windows process-group shutdown, registry/FileLock optimization, response previews, and query caching.
