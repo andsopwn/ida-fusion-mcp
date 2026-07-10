@@ -6,6 +6,7 @@ Manages the global registry of IDA Pro instances with atomic file operations.
 import ipaddress
 import json
 import os
+import secrets
 import stat
 import sys
 import tempfile
@@ -293,6 +294,53 @@ class InstanceRegistry:
 
             self._save(data)
             return True
+
+    def unregister_if_owner(
+        self,
+        instance_id: str,
+        expected_nonce: str | None,
+    ) -> dict[str, Any]:
+        """Remove an instance only when its ownership generation still matches.
+
+        The comparison and deletion share one registry lock so a stale manager
+        cannot delete a newer entry that reused the same short instance ID.
+        Missing or mismatched ownership tokens preserve the current entry.
+        """
+        with FileLock(self.lock_path):
+            data = self._load()
+            instance = data["instances"].get(instance_id)
+            if instance is None:
+                return {"status": "missing", "removed": False}
+
+            if not isinstance(expected_nonce, str) or not expected_nonce:
+                return {
+                    "status": "owner_mismatch",
+                    "removed": False,
+                    "reason": "missing_expected_nonce",
+                }
+
+            current_nonce = instance.get("_manager_nonce")
+            if not isinstance(current_nonce, str) or not current_nonce:
+                return {
+                    "status": "owner_mismatch",
+                    "removed": False,
+                    "reason": "missing_entry_nonce",
+                }
+
+            if not secrets.compare_digest(current_nonce, expected_nonce):
+                return {
+                    "status": "owner_mismatch",
+                    "removed": False,
+                    "reason": "nonce_mismatch",
+                }
+
+            del data["instances"][instance_id]
+            if data["active_instance"] == instance_id:
+                remaining = list(data["instances"].keys())
+                data["active_instance"] = remaining[0] if remaining else None
+
+            self._save(data)
+            return {"status": "removed", "removed": True}
 
     def get_instance(self, instance_id: str) -> dict[str, Any] | None:
         """Get metadata for a specific instance.

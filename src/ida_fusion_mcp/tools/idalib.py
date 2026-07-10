@@ -177,6 +177,7 @@ IDALIB_TOOL_SCHEMAS: list[dict] = [
             },
             "required": ["input_path"],
         },
+        "outputSchema": {"type": "object"},
     },
     {
         "name": "idalib_close",
@@ -195,6 +196,7 @@ IDALIB_TOOL_SCHEMAS: list[dict] = [
             },
             "required": ["instance_id"],
         },
+        "outputSchema": {"type": "object"},
     },
     {
         "name": "idalib_list",
@@ -204,6 +206,7 @@ IDALIB_TOOL_SCHEMAS: list[dict] = [
             "properties": {},
             "required": [],
         },
+        "outputSchema": {"type": "object"},
     },
     {
         "name": "idalib_status",
@@ -221,5 +224,6 @@ IDALIB_TOOL_SCHEMAS: list[dict] = [
             },
             "required": ["instance_id"],
         },
+        "outputSchema": {"type": "object"},
     },
 ]

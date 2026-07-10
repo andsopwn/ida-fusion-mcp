@@ -1348,6 +1348,11 @@ def callgraph(
 # xref_query — unified xref query with direction + type filter
 # ============================================================================
 
+_MAX_XREF_QUERY_COUNT = 1000
+_MAX_XREF_QUERY_OFFSET = 8999
+_MIN_XREF_QUERY_SCAN = 1000
+_MAX_XREF_QUERY_SCAN = 10000
+
 
 @tool
 @idasync
@@ -1366,46 +1371,108 @@ def xref_query(
         addr_str = query.get("addr", "")
         direction = query.get("direction", "to")
         type_filter = query.get("type_filter", "all")
-        offset = query.get("offset", 0)
-        count = query.get("count", 100)
-
         try:
+            offset = max(0, int(query.get("offset", 0)))
+            if offset > _MAX_XREF_QUERY_OFFSET:
+                raise ValueError(
+                    f"offset must not exceed {_MAX_XREF_QUERY_OFFSET}"
+                )
+            count = int(query.get("count", 100))
+            if count <= 0 or count > _MAX_XREF_QUERY_COUNT:
+                count = _MAX_XREF_QUERY_COUNT
+            scan_limit = min(
+                _MAX_XREF_QUERY_SCAN,
+                max(_MIN_XREF_QUERY_SCAN, offset + count + 1),
+            )
             ea = parse_address(addr_str)
-            xrefs_raw: list[dict] = []
+            page_data: list[dict] = []
             seen: set[tuple] = set()
+            matched = 0
+            more = False
+            scanned = 0
+            scan_limited = False
+
+            def add_xref(
+                xref_direction: str,
+                from_ea: int,
+                to_ea: int,
+                is_code: bool,
+            ) -> bool:
+                nonlocal matched, more
+                xtype = "code" if is_code else "data"
+                if type_filter != "all" and xtype != type_filter:
+                    return False
+
+                key = (xref_direction, from_ea, to_ea, is_code)
+                if key in seen:
+                    return False
+                seen.add(key)
+
+                if matched < offset:
+                    matched += 1
+                    return False
+                if len(page_data) >= count:
+                    more = True
+                    return True
+
+                target = from_ea if xref_direction == "to" else to_ea
+                page_data.append(
+                    {
+                        "direction": xref_direction,
+                        "from": hex(from_ea),
+                        "to": hex(to_ea),
+                        "type": xtype,
+                        "fn": get_function(target, raise_error=False),
+                    }
+                )
+                matched += 1
+                return False
 
             if direction in ("to", "both"):
                 for xref in idautils.XrefsTo(ea, 0):
-                    key = ("to", xref.frm, ea, xref.iscode)
-                    if key in seen:
-                        continue
-                    seen.add(key)
-                    xtype = "code" if xref.iscode else "data"
-                    if type_filter != "all" and xtype != type_filter:
-                        continue
-                    xrefs_raw.append({
-                        "direction": "to", "from": hex(xref.frm), "to": hex(ea),
-                        "type": xtype,
-                        "fn": get_function(xref.frm, raise_error=False),
-                    })
+                    if scanned >= scan_limit:
+                        scan_limited = True
+                        break
+                    scanned += 1
+                    if add_xref("to", xref.frm, ea, xref.iscode):
+                        break
 
-            if direction in ("from", "both"):
+            if not more and not scan_limited and direction in ("from", "both"):
                 for xref in idautils.XrefsFrom(ea, 0):
-                    key = ("from", ea, xref.to, xref.iscode)
-                    if key in seen:
-                        continue
-                    seen.add(key)
-                    xtype = "code" if xref.iscode else "data"
-                    if type_filter != "all" and xtype != type_filter:
-                        continue
-                    xrefs_raw.append({
-                        "direction": "from", "from": hex(ea), "to": hex(xref.to),
-                        "type": xtype,
-                        "fn": get_function(xref.to, raise_error=False),
-                    })
+                    if scanned >= scan_limit:
+                        scan_limited = True
+                        break
+                    scanned += 1
+                    if add_xref("from", ea, xref.to, xref.iscode):
+                        break
 
-            page = paginate(xrefs_raw, offset, count)
-            results.append({"addr": addr_str, **page})
+            if scan_limited:
+                raise ValueError(
+                    f"xref scan limit ({scan_limit}) exceeded; narrow the query"
+                )
+
+            next_offset = offset + len(page_data) if more else None
+            result = {
+                "addr": addr_str,
+                "data": page_data,
+                "next_offset": next_offset,
+                "more": more,
+            }
+            if (
+                next_offset is not None
+                and next_offset > _MAX_XREF_QUERY_OFFSET
+            ):
+                result.update(
+                    {
+                        "next_offset": None,
+                        "pagination_limited": True,
+                        "error": (
+                            "xref pagination limit reached; narrow the query "
+                            "before requesting more results"
+                        ),
+                    }
+                )
+            results.append(result)
         except Exception as e:
             results.append({"addr": addr_str, "error": str(e)})
 

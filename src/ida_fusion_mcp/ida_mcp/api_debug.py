@@ -227,7 +227,7 @@ def list_breakpoints():
 @unsafe
 @tool
 @idasync
-def dbg_start():
+def dbg_start() -> str:
     """Start debugger"""
     if len(list_breakpoints()) == 0:
         for i in range(compat.get_entry_qty()):
@@ -256,7 +256,7 @@ def dbg_status() -> dict:
 @unsafe
 @tool
 @idasync
-def dbg_exit():
+def dbg_exit() -> None:
     """Exit debugger"""
     dbg_ensure_running()
     if idaapi.exit_process():
@@ -284,7 +284,7 @@ def dbg_continue() -> str:
 @idasync
 def dbg_run_to(
     addr: Annotated[str, "Address"],
-):
+) -> str:
     """Run to address"""
     dbg_ensure_running()
     ea = parse_address(addr)
@@ -299,7 +299,7 @@ def dbg_run_to(
 @unsafe
 @tool
 @idasync
-def dbg_step_into():
+def dbg_step_into() -> str:
     """Step into"""
     dbg_ensure_running()
     if idaapi.step_into():
@@ -313,7 +313,7 @@ def dbg_step_into():
 @unsafe
 @tool
 @idasync
-def dbg_step_over():
+def dbg_step_over() -> str:
     """Step over"""
     dbg_ensure_running()
     if idaapi.step_over():
@@ -332,7 +332,7 @@ def dbg_step_over():
 @unsafe
 @tool
 @idasync
-def dbg_bps():
+def dbg_bps() -> list[Breakpoint]:
     """List breakpoints"""
     return list_breakpoints()
 

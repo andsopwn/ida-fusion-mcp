@@ -66,7 +66,7 @@ def _sync_wrapper(ff):
     """Run ff on IDA's main thread and return errors through the result channel."""
     res_container = queue.Queue(maxsize=1)
 
-    def runned():
+    def runned() -> int:
         if call_stack:
             active_name = call_stack[-1][1]
             res_container.put(
@@ -75,7 +75,7 @@ def _sync_wrapper(ff):
                     f"{ff.__name__} from {active_name}"
                 )
             )
-            return
+            return 0
 
         entry = (object(), ff.__name__)
         call_stack.append(entry)
@@ -96,9 +96,19 @@ def _sync_wrapper(ff):
                 if call_stack and call_stack[-1] is entry:
                     call_stack.pop()
                 res_container.put(result)
+        return 0
 
-    idaapi.execute_sync(runned, idaapi.MFF_WRITE)
-    result = res_container.get()
+    execute_result = idaapi.execute_sync(runned, idaapi.MFF_WRITE)
+    if execute_result == -1:
+        raise IDASyncError(
+            f"Failed to schedule {ff.__name__} on IDA's main thread"
+        )
+    try:
+        result = res_container.get_nowait()
+    except queue.Empty as exc:
+        raise IDASyncError(
+            f"IDA main-thread call {ff.__name__} completed without a result"
+        ) from exc
     if isinstance(result, Exception):
         raise result
     return result
@@ -126,14 +136,18 @@ def sync_wrapper(ff, timeout_override: float | None = None):
             cancel_fired_at: list[float | None] = [None]
             native_timer: threading.Timer | None = None
             timer_started = False
+            cancel_watcher: threading.Thread | None = None
+            watcher_started = False
+            cancel_watcher_stop = threading.Event()
             cancel_armed = threading.Event()
             try:
                 deadline = time.monotonic() + timeout if timeout > 0 else None
                 _deadline_state.deadline = deadline
                 ida_kernwin.clr_cancelled()
-                if deadline is not None:
+                if deadline is not None or cancel_event is not None:
                     cancel_armed.set()
 
+                if deadline is not None:
                     def fire_native_cancel():
                         if not cancel_armed.is_set():
                             return
@@ -144,6 +158,19 @@ def sync_wrapper(ff, timeout_override: float | None = None):
                     native_timer.daemon = True
                     native_timer.start()
                     timer_started = True
+
+                if cancel_event is not None:
+                    def watch_request_cancel():
+                        while not cancel_event.is_set():
+                            if cancel_watcher_stop.wait(0.01):
+                                return
+                        if cancel_armed.is_set():
+                            ida_kernwin.set_cancelled()
+
+                    cancel_watcher = threading.Thread(target=watch_request_cancel)
+                    cancel_watcher.daemon = True
+                    cancel_watcher.start()
+                    watcher_started = True
 
                 def profilefunc(frame, event, arg):
                     if cancel_event is not None and cancel_event.is_set():
@@ -161,6 +188,7 @@ def sync_wrapper(ff, timeout_override: float | None = None):
                     sys.setprofile(old_profile)
                 finally:
                     cancel_armed.clear()
+                    cancel_watcher_stop.set()
                     try:
                         if native_timer is not None:
                             native_timer.cancel()
@@ -168,9 +196,13 @@ def sync_wrapper(ff, timeout_override: float | None = None):
                                 native_timer.join()
                     finally:
                         try:
-                            ida_kernwin.clr_cancelled()
+                            if cancel_watcher is not None and watcher_started:
+                                cancel_watcher.join()
                         finally:
-                            _deadline_state.deadline = previous_deadline
+                            try:
+                                ida_kernwin.clr_cancelled()
+                            finally:
+                                _deadline_state.deadline = previous_deadline
 
         timed_ff.__name__ = ff.__name__
         return _sync_wrapper(timed_ff)

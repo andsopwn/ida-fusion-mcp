@@ -502,8 +502,124 @@ class IdaFusionMcpServer:
         def _json_text(value: Any) -> str:
             return json.dumps(value, separators=(",", ":"))
 
-        def _schema_preserving_preview(value: Any, max_chars: int) -> Any:
-            """Return a smaller value of the same JSON type (str/list/dict) when huge."""
+        def _schema_type_matches(value: Any, expected: str) -> bool:
+            if expected == "object":
+                return isinstance(value, dict)
+            if expected == "array":
+                return isinstance(value, (list, tuple))
+            if expected == "string":
+                return isinstance(value, str)
+            if expected == "boolean":
+                return isinstance(value, bool)
+            if expected == "integer":
+                return isinstance(value, int) and not isinstance(value, bool)
+            if expected == "number":
+                return isinstance(value, (int, float)) and not isinstance(value, bool)
+            if expected == "null":
+                return value is None
+            return True
+
+        def _schema_for_value(schema: Any, value: Any) -> dict[str, Any]:
+            if not isinstance(schema, dict):
+                return {}
+            branches = schema.get("anyOf")
+            if isinstance(branches, list):
+                for branch in branches:
+                    if not isinstance(branch, dict):
+                        continue
+                    branch_type = branch.get("type")
+                    if isinstance(branch_type, str) and _schema_type_matches(
+                        value, branch_type
+                    ):
+                        return branch
+            schema_type = schema.get("type")
+            if isinstance(schema_type, list):
+                for candidate in schema_type:
+                    if isinstance(candidate, str) and _schema_type_matches(
+                        value, candidate
+                    ):
+                        return {**schema, "type": candidate}
+            return schema
+
+        def _minimal_schema_value(schema: Any, value: Any = None) -> Any:
+            """Build the smallest useful value that satisfies our output schemas."""
+            # An empty schema accepts every JSON value; ``0`` is the shortest
+            # portable representation and keeps preflight/preview budgets equal.
+            if not schema:
+                return 0
+            if isinstance(schema, dict):
+                branches = schema.get("anyOf")
+                if isinstance(branches, list):
+                    candidates = [
+                        _minimal_schema_value(branch)
+                        for branch in branches
+                        if isinstance(branch, dict)
+                    ]
+                    if candidates:
+                        return min(candidates, key=lambda item: len(_json_text(item)))
+
+                schema_types = schema.get("type")
+                if isinstance(schema_types, list):
+                    candidates = [
+                        _minimal_schema_value({**schema, "type": schema_type})
+                        for schema_type in schema_types
+                        if isinstance(schema_type, str)
+                    ]
+                    if candidates:
+                        return min(candidates, key=lambda item: len(_json_text(item)))
+
+            resolved = _schema_for_value(schema, value)
+            schema_type = resolved.get("type")
+            if schema_type == "object" or (
+                schema_type is None and isinstance(value, dict)
+            ):
+                properties = resolved.get("properties")
+                if not isinstance(properties, dict):
+                    properties = {}
+                required = resolved.get("required")
+                if not isinstance(required, list):
+                    required = []
+                source = value if isinstance(value, dict) else {}
+                return {
+                    key: _minimal_schema_value(
+                        properties.get(key, {}), source.get(key)
+                    )
+                    for key in required
+                    if isinstance(key, str)
+                }
+            if schema_type == "array" or (
+                schema_type is None and isinstance(value, (list, tuple))
+            ):
+                return []
+            if schema_type == "string" or (
+                schema_type is None and isinstance(value, str)
+            ):
+                return ""
+            if schema_type == "boolean" or (
+                schema_type is None and isinstance(value, bool)
+            ):
+                return False
+            if schema_type == "integer" or (
+                schema_type is None
+                and isinstance(value, int)
+                and not isinstance(value, bool)
+            ):
+                return 0
+            if schema_type == "number" or (
+                schema_type is None
+                and isinstance(value, float)
+            ):
+                return 0.0
+            if schema_type == "null" or value is None:
+                return None
+            return value
+
+        def _schema_preserving_preview(
+            value: Any,
+            max_chars: int,
+            schema: Any = None,
+        ) -> Any:
+            """Return a bounded preview that keeps required schema structure."""
             if max_chars <= 0:
                 return value
             try:
@@ -512,36 +628,122 @@ class IdaFusionMcpServer:
             except Exception:
                 return value
 
-            if isinstance(value, str):
-                return value[:max_chars]
+            resolved_schema = _schema_for_value(schema, value)
 
-            if isinstance(value, list):
+            if isinstance(value, str):
+                # JSON quotes and escapes consume budget too. Binary-search the
+                # longest prefix whose serialized form fits.
+                low = 0
+                high = min(len(value), max_chars)
+                while low < high:
+                    mid = (low + high + 1) // 2
+                    if len(_json_text(value[:mid])) <= max_chars:
+                        low = mid
+                    else:
+                        high = mid - 1
+                return value[:low]
+
+            if isinstance(value, (list, tuple)):
                 out: list[Any] = []
+                used = 2  # '[' and ']'
                 for item in value:
-                    out.append(item)
+                    separator = 1 if out else 0
+                    remaining = max_chars - used - separator
+                    if remaining <= 0:
+                        break
                     try:
-                        if len(_json_text(out)) > max_chars:
-                            out.pop()
-                            break
+                        item_text = _json_text(item)
                     except Exception:
                         break
+                    if len(item_text) > remaining:
+                        break
+                    # Keep only complete items. Partially trimming a typed
+                    # object can remove fields required by outputSchema.
+                    out.append(item)
+                    used += separator + len(item_text)
                 return out
 
             if isinstance(value, dict):
-                def _truncate(v: Any, depth: int = 0) -> Any:
-                    if depth > 6:
-                        return v
-                    if isinstance(v, str) and len(v) > 1000:
-                        return v[:1000] + f"... [{len(v)} chars total]"
-                    if isinstance(v, list):
-                        return [_truncate(x, depth + 1) for x in v[:50]]
-                    if isinstance(v, dict):
-                        return {k: _truncate(x, depth + 1) for k, x in v.items()}
-                    return v
+                properties = resolved_schema.get("properties")
+                if not isinstance(properties, dict):
+                    properties = {}
+                required = resolved_schema.get("required")
+                if not isinstance(required, list):
+                    required = []
+                required = [key for key in required if isinstance(key, str)]
+                additional = resolved_schema.get("additionalProperties", {})
 
-                return _truncate(value)
+                out: dict[Any, Any] = {
+                    key: _minimal_schema_value(
+                        properties.get(key, {}), value.get(key)
+                    )
+                    for key in required
+                }
+                try:
+                    if len(_json_text(out)) > max_chars:
+                        return out
+                except Exception:
+                    return out
 
-            return value
+                ordered_keys = [
+                    *[key for key in required if key in value],
+                    *[key for key in value if key not in required],
+                ]
+                for key in ordered_keys:
+                    item = value[key]
+                    if (
+                        resolved_schema.get("additionalProperties") is False
+                        and key not in properties
+                    ):
+                        continue
+                    item_schema = properties.get(key)
+                    if not isinstance(item_schema, dict):
+                        item_schema = additional if isinstance(additional, dict) else {}
+
+                    if key in out:
+                        try:
+                            current_size = len(_json_text(out[key]))
+                            available = (
+                                max_chars - len(_json_text(out)) + current_size
+                            )
+                        except Exception:
+                            continue
+                        candidate = _schema_preserving_preview(
+                            item, available, item_schema
+                        )
+                        trial = {**out, key: candidate}
+                        try:
+                            if len(_json_text(trial)) <= max_chars:
+                                out = trial
+                        except Exception:
+                            pass
+                        continue
+
+                    try:
+                        key_text = _json_text(
+                            key if isinstance(key, str) else str(key)
+                        )
+                    except Exception:
+                        break
+                    used = len(_json_text(out))
+                    separator = 1 if out else 0
+                    overhead = separator + len(key_text) + 1  # comma/key/colon
+                    remaining = max_chars - used - overhead
+                    if remaining <= 0:
+                        continue
+                    candidate = _schema_preserving_preview(
+                        item, remaining, item_schema
+                    )
+                    try:
+                        item_text = _json_text(candidate)
+                    except Exception:
+                        continue
+                    if len(item_text) > remaining:
+                        continue
+                    out[key] = candidate
+                return out
+
+            return _minimal_schema_value(resolved_schema, value)
 
         # Override tools/list to return cached tools
 
@@ -663,6 +865,36 @@ class IdaFusionMcpServer:
 
                 # Extract max_output_chars if provided (0 = unlimited)
                 max_output = arguments.pop("max_output_chars", DEFAULT_MAX_OUTPUT_CHARS)
+                output_schema = self._tool_cache.get(name, {}).get("outputSchema")
+                if (
+                    isinstance(max_output, bool)
+                    or not isinstance(max_output, int)
+                    or max_output < 0
+                ):
+                    return {
+                        "content": [{
+                            "type": "text",
+                            "text": (
+                                "Error: max_output_chars must be a non-negative "
+                                "integer (0 means unlimited)"
+                            ),
+                        }],
+                        "isError": True,
+                    }
+                if max_output > 0:
+                    minimum_preview = _minimal_schema_value(output_schema)
+                    minimum_chars = len(_json_text(minimum_preview))
+                    if max_output < minimum_chars:
+                        return {
+                            "content": [{
+                                "type": "text",
+                                "text": (
+                                    "Error: max_output_chars is below the minimum "
+                                    f"schema-valid preview size ({minimum_chars})"
+                                ),
+                            }],
+                            "isError": True,
+                        }
 
                 ida_response = self.router.route_request("tools/call", {
                     "name": name,
@@ -714,18 +946,25 @@ class IdaFusionMcpServer:
                     instance_id = arguments.get("instance_id") or "unknown"
                     cache_id = cache.store(structured_text, tool_name=name, instance_id=instance_id)
 
-                    preview_structured = _schema_preserving_preview(structured, max_output)
-                    preview_text = _json_text(preview_structured)
+                    preview_structured = _schema_preserving_preview(
+                        structured,
+                        max_output,
+                        output_schema,
+                    )
+                    shown_text = structured_text[:max_output]
+                    shown_chars = len(shown_text)
 
                     truncation_notice = (
                         f"\n\n--- TRUNCATED ---\n"
-                        f"Showing ~{max_output:,} of {total_chars:,} chars ({total_chars - max_output:,} remaining)\n"
+                        f"Showing {shown_chars:,} of {total_chars:,} chars "
+                        f"({total_chars - shown_chars:,} remaining)\n"
                         f"cache_id: {cache_id}\n"
-                        f"To get more: get_cached_output(cache_id='{cache_id}', offset={max_output})"
+                        f"To get more: get_cached_output(cache_id='{cache_id}', "
+                        f"offset={shown_chars})"
                     )
 
                     return {
-                        "content": [{"type": "text", "text": preview_text[:max_output] + truncation_notice}],
+                        "content": [{"type": "text", "text": shown_text + truncation_notice}],
                         "structuredContent": preview_structured,
                         "isError": False,
                     }
@@ -1013,7 +1252,8 @@ class IdaFusionMcpServer:
                 "type": "object",
                 "properties": {},
                 "required": []
-            }
+            },
+            "outputSchema": {"type": "object"},
         }
 
         self._tool_cache["compare_binaries"] = {
@@ -1026,7 +1266,8 @@ class IdaFusionMcpServer:
                     "instance_id_b": {"type": "string", "description": "Second instance ID"},
                 },
                 "required": ["instance_id_a", "instance_id_b"]
-            }
+            },
+            "outputSchema": {"type": "object"},
         }
 
         self._tool_cache["list_cached_outputs"] = {
@@ -1036,7 +1277,8 @@ class IdaFusionMcpServer:
                 "type": "object",
                 "properties": {},
                 "required": []
-            }
+            },
+            "outputSchema": {"type": "object"},
         }
 
         self._tool_cache["get_cached_output"] = {
@@ -1059,7 +1301,8 @@ class IdaFusionMcpServer:
                     }
                 },
                 "required": ["cache_id"]
-            }
+            },
+            "outputSchema": {"type": "object"},
         }
 
         self._tool_cache["decompile_to_file"] = {
@@ -1098,7 +1341,8 @@ class IdaFusionMcpServer:
                     }
                 },
                 "required": ["output_dir", "instance_id"]
-            }
+            },
+            "outputSchema": {"type": "object"},
         }
 
         # Register idalib management schemas unconditionally. GUI reuse modes do
@@ -1212,7 +1456,11 @@ class IdaFusionMcpServer:
         for tool_schema in self._tool_cache.values():
             os = tool_schema.get("outputSchema")
             if not os:
-                tool_schema["outputSchema"] = {"type": "object"}
+                tool_schema["outputSchema"] = {
+                    "type": "object",
+                    "properties": {"result": {}},
+                    "required": ["result"],
+                }
                 continue
             if os.get("type") != "object":
                 tool_schema["outputSchema"] = {

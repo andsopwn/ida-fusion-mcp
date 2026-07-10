@@ -91,6 +91,32 @@ class _StderrDrainer:
             thread.join(timeout)
 
 
+class _OwnedWorkerGeneration:
+    """One locally owned process generation and its cleanup identity."""
+
+    def __init__(
+        self,
+        process: subprocess.Popen,
+        ownership_nonce: str | None,
+        drainer: _StderrDrainer | None,
+    ):
+        self.process = process
+        self.ownership_nonce = ownership_nonce
+        self.drainer = drainer
+        self._finish_lock = threading.Lock()
+        self._finished = False
+
+    def finish_drainer(self) -> None:
+        with self._finish_lock:
+            if self._finished:
+                return
+            self._finished = True
+        if self.drainer is not None:
+            self.drainer.finish()
+            return
+        IdalibManager._close_stderr_stream(self.process)
+
+
 def is_idalib_available() -> bool:
     """Check whether the detected IDA installation includes idalib (Pro only).
 
@@ -182,8 +208,12 @@ class IdalibManager:
     ):
         self.registry = registry
         self.python_executable = python_executable or sys.executable
+        self._state_lock = threading.RLock()
+        self._owned_generations: dict[str, _OwnedWorkerGeneration] = {}
         # instance_id -> subprocess.Popen
         self._processes: dict[str, subprocess.Popen] = {}
+        # instance_id -> per-registration ownership generation
+        self._ownership_nonces: dict[str, str] = {}
         # instance_id -> bounded stderr drainer
         self._stderr_drainers: dict[str, _StderrDrainer] = {}
         # Local cleanup IDs for workers that could not be registered or stopped.
@@ -427,8 +457,12 @@ class IdalibManager:
                 ownership_nonce=ownership_nonce,
             )
             if reconciled_id is not None and reconciled_info is not None:
-                self._processes[reconciled_id] = proc
-                self._stderr_drainers[reconciled_id] = stderr_drainer
+                self._remember_owned_generation(
+                    reconciled_id,
+                    proc,
+                    ownership_nonce,
+                    stderr_drainer,
+                )
                 warnings.append(
                     "Registry entry committed despite register() raising; "
                     f"ownership reconciled under '{reconciled_id}': {registration_error}"
@@ -475,8 +509,12 @@ class IdalibManager:
                 ),
             )
 
-        self._processes[instance_id] = proc
-        self._stderr_drainers[instance_id] = stderr_drainer
+        self._remember_owned_generation(
+            instance_id,
+            proc,
+            ownership_nonce,
+            stderr_drainer,
+        )
         return self._owned_worker_result(
             instance_id=instance_id,
             host=host,
@@ -492,7 +530,8 @@ class IdalibManager:
 
         Returns ``{"ok": True}`` on success or ``{"error": ...}`` on failure.
         """
-        proc = self._processes.get(instance_id)
+        generation = self._capture_generation(instance_id)
+        proc = generation.process if generation is not None else None
         if proc is None and instance_id in self._pending_registry_contexts:
             return self._cleanup_pending_registry(
                 instance_id,
@@ -509,12 +548,20 @@ class IdalibManager:
                     except Exception:
                         alive = None
                     if alive is False:
-                        try:
-                            self.registry.unregister(instance_id)
-                        except Exception as exc:
+                        snapshot_nonce = info.get("_manager_nonce")
+                        if not isinstance(snapshot_nonce, str):
+                            snapshot_nonce = None
+                        cleanup_error = self._unregister_error(
+                            instance_id,
+                            ownership_nonce=snapshot_nonce,
+                        )
+                        if cleanup_error is not None:
                             return {
                                 "ok": False,
-                                "error": f"Worker was already dead, but registry cleanup failed: {exc}",
+                                "error": (
+                                    "Worker was already dead, but registry cleanup failed: "
+                                    f"{cleanup_error}"
+                                ),
                                 "instance_id": instance_id,
                                 "pid": pid,
                                 "managed": False,
@@ -523,7 +570,10 @@ class IdalibManager:
                             }
                         return {
                             "ok": True,
-                            "note": "stale registry entry removed; worker was already dead",
+                            "note": (
+                                "stale registry generation cleared or replaced; "
+                                "worker was already dead"
+                            ),
                             "instance_id": instance_id,
                             "pid": pid,
                             "managed": False,
@@ -581,8 +631,9 @@ class IdalibManager:
                     ),
                     "hint": "Resolve the process termination failure, then retry idalib_close.",
                 }
-        self._processes.pop(instance_id, None)
-        self._finish_drainer(instance_id, proc)
+        assert generation is not None
+        self._release_generation(instance_id, generation)
+        generation.finish_drainer()
         if local_only:
             if instance_id in self._pending_registry_contexts:
                 return self._cleanup_pending_registry(
@@ -599,12 +650,14 @@ class IdalibManager:
                 "registry_cleaned": True,
                 "note": "unregistered worker stopped and local cleanup state removed",
             }
-        try:
-            self.registry.unregister(instance_id)
-        except Exception as exc:
+        cleanup_error = self._unregister_error(
+            instance_id,
+            generation.ownership_nonce,
+        )
+        if cleanup_error is not None:
             return {
                 "ok": False,
-                "error": f"Worker stopped, but registry cleanup failed: {exc}",
+                "error": f"Worker stopped, but registry cleanup failed: {cleanup_error}",
                 "instance_id": instance_id,
                 "pid": proc.pid,
                 "managed": False,
@@ -619,9 +672,11 @@ class IdalibManager:
 
     def close_all_sessions(self) -> int:
         """Terminate all managed idalib workers. Returns count closed."""
+        with self._state_lock:
+            process_ids = list(self._processes)
         ids = list(
             dict.fromkeys(
-                [*self._processes.keys(), *self._pending_registry_contexts.keys()]
+                [*process_ids, *self._pending_registry_contexts.keys()]
             )
         )
         closed = 0
@@ -641,20 +696,21 @@ class IdalibManager:
     def list_sessions(self) -> list[dict]:
         """Return info about all managed idalib sessions."""
         result = []
-        for iid, proc in list(self._processes.items()):
+        for iid, generation in self._generation_snapshots():
+            proc = generation.process
             info = self.registry.get_instance(iid)
             alive = is_process_alive(proc.pid)
             if not alive:
                 # Clean up dead workers.
-                del self._processes[iid]
-                self._finish_drainer(iid, proc)
+                self._release_generation(iid, generation)
+                generation.finish_drainer()
                 local_only = iid in self._unregistered_sessions
                 if local_only and iid in self._pending_registry_contexts:
                     self._cleanup_pending_registry(iid, process_stopped=True)
                 elif local_only:
                     self._unregistered_sessions.discard(iid)
                 else:
-                    self._unregister_error(iid)
+                    self._unregister_error(iid, generation.ownership_nonce)
                 continue
             pending = self._pending_registry_contexts.get(iid)
             result.append({
@@ -686,7 +742,8 @@ class IdalibManager:
 
     def get_status(self, instance_id: str) -> dict:
         """Health / readiness check for a specific idalib session."""
-        proc = self._processes.get(instance_id)
+        generation = self._capture_generation(instance_id)
+        proc = generation.process if generation is not None else None
         if proc is None:
             pending = self._pending_registry_contexts.get(instance_id)
             if pending is not None:
@@ -705,8 +762,9 @@ class IdalibManager:
         info = self.registry.get_instance(instance_id)
         alive = is_process_alive(proc.pid)
         if not alive:
-            del self._processes[instance_id]
-            self._finish_drainer(instance_id, proc)
+            assert generation is not None
+            self._release_generation(instance_id, generation)
+            generation.finish_drainer()
             local_only = instance_id in self._unregistered_sessions
             registry_cleanup_error = None
             pending_cleanup = None
@@ -718,7 +776,10 @@ class IdalibManager:
             elif local_only:
                 self._unregistered_sessions.discard(instance_id)
             else:
-                registry_cleanup_error = self._unregister_error(instance_id)
+                registry_cleanup_error = self._unregister_error(
+                    instance_id,
+                    generation.ownership_nonce,
+                )
             result = {
                 "instance_id": instance_id,
                 "alive": False,
@@ -771,21 +832,96 @@ class IdalibManager:
     # Internal helpers
     # ------------------------------------------------------------------
 
+    def _remember_owned_generation(
+        self,
+        instance_id: str,
+        process: subprocess.Popen,
+        ownership_nonce: str,
+        drainer: _StderrDrainer,
+    ) -> _OwnedWorkerGeneration:
+        generation = _OwnedWorkerGeneration(process, ownership_nonce, drainer)
+        with self._state_lock:
+            self._owned_generations[instance_id] = generation
+            self._processes[instance_id] = process
+            self._ownership_nonces[instance_id] = ownership_nonce
+            self._stderr_drainers[instance_id] = drainer
+        return generation
+
+    def _capture_generation(
+        self,
+        instance_id: str,
+    ) -> _OwnedWorkerGeneration | None:
+        with self._state_lock:
+            process = self._processes.get(instance_id)
+            if process is None:
+                return None
+            generation = self._owned_generations.get(instance_id)
+            if generation is not None and generation.process is process:
+                return generation
+            return _OwnedWorkerGeneration(
+                process,
+                self._ownership_nonces.get(instance_id),
+                self._stderr_drainers.get(instance_id),
+            )
+
+    def _generation_snapshots(
+        self,
+    ) -> list[tuple[str, _OwnedWorkerGeneration]]:
+        with self._state_lock:
+            snapshots = []
+            for instance_id, process in self._processes.items():
+                generation = self._owned_generations.get(instance_id)
+                if generation is None or generation.process is not process:
+                    generation = _OwnedWorkerGeneration(
+                        process,
+                        self._ownership_nonces.get(instance_id),
+                        self._stderr_drainers.get(instance_id),
+                    )
+                snapshots.append((instance_id, generation))
+            return snapshots
+
+    def _release_generation(
+        self,
+        instance_id: str,
+        generation: _OwnedWorkerGeneration,
+    ) -> bool:
+        """Drop local state only if *generation* still occupies the ID."""
+        with self._state_lock:
+            current_generation = self._owned_generations.get(instance_id)
+            if current_generation is not None and current_generation is not generation:
+                return False
+
+            current_process = self._processes.get(instance_id)
+            if current_process is not generation.process:
+                if current_generation is generation:
+                    self._owned_generations.pop(instance_id, None)
+                return False
+
+            if current_generation is generation:
+                self._owned_generations.pop(instance_id, None)
+            self._processes.pop(instance_id, None)
+            if self._ownership_nonces.get(instance_id) == generation.ownership_nonce:
+                self._ownership_nonces.pop(instance_id, None)
+            if self._stderr_drainers.get(instance_id) is generation.drainer:
+                self._stderr_drainers.pop(instance_id, None)
+            return True
+
     def _owned_worker_count(self) -> int:
         pids: set[int] = set()
-        for iid, proc in list(self._processes.items()):
+        for iid, generation in self._generation_snapshots():
+            proc = generation.process
             if is_process_alive(proc.pid):
                 pids.add(proc.pid)
                 continue
-            del self._processes[iid]
-            self._finish_drainer(iid, proc)
+            self._release_generation(iid, generation)
+            generation.finish_drainer()
             local_only = iid in self._unregistered_sessions
             if local_only and iid in self._pending_registry_contexts:
                 self._cleanup_pending_registry(iid, process_stopped=True)
             elif local_only:
                 self._unregistered_sessions.discard(iid)
             else:
-                self._unregister_error(iid)
+                self._unregister_error(iid, generation.ownership_nonce)
         for info in self.registry.list_instances().values():
             if info.get("type") != "idalib" or not info.get("owned", False):
                 continue
@@ -805,12 +941,70 @@ class IdalibManager:
         except Exception:
             return False
 
-    def _unregister_error(self, instance_id: str) -> str | None:
-        try:
-            self.registry.unregister(instance_id)
+    def _conditional_unregister(
+        self,
+        instance_id: str,
+        ownership_nonce: str | None,
+    ) -> dict[str, Any]:
+        """Atomically unregister one owned registry generation.
+
+        Real ``InstanceRegistry`` implementations expose the guarded method.
+        The fallback preserves compatibility with older duck-typed registry
+        doubles while production cleanup always uses compare-and-delete.
+        """
+        guarded_method = getattr(
+            type(self.registry),
+            "unregister_if_owner",
+            None,
+        )
+        if not callable(guarded_method):
+            removed = self.registry.unregister(instance_id)
+            if removed is False:
+                return {"status": "missing", "removed": False}
+            return {"status": "removed", "removed": True}
+
+        result = self.registry.unregister_if_owner(
+            instance_id,
+            ownership_nonce,
+        )
+        if not isinstance(result, dict) or result.get("status") not in {
+            "removed",
+            "missing",
+            "owner_mismatch",
+        }:
+            raise RuntimeError("invalid conditional unregister result")
+        return result
+
+    @staticmethod
+    def _conditional_unregister_error(result: dict[str, Any]) -> str | None:
+        status = result.get("status")
+        if status in {"removed", "missing"}:
             return None
+        reason = result.get("reason")
+        if status == "owner_mismatch" and reason == "nonce_mismatch":
+            # The old generation has already been replaced. Preserve its owner.
+            return None
+        if reason == "missing_expected_nonce":
+            return "registry ownership nonce is unavailable; current entry preserved"
+        if reason == "missing_entry_nonce":
+            return "registry entry has no ownership nonce; current entry preserved"
+        return "registry ownership could not be verified; current entry preserved"
+
+    def _unregister_error(
+        self,
+        instance_id: str,
+        ownership_nonce: str | None = None,
+    ) -> str | None:
+        if ownership_nonce is None:
+            ownership_nonce = self._ownership_nonces.get(instance_id)
+        try:
+            result = self._conditional_unregister(instance_id, ownership_nonce)
+            return self._conditional_unregister_error(result)
         except Exception as exc:
-            return str(exc)
+            error = str(exc)
+            if isinstance(ownership_nonce, str) and ownership_nonce:
+                error = error.replace(ownership_nonce, "<redacted>")
+            return error
 
     @staticmethod
     def _close_stderr_stream(proc: subprocess.Popen) -> None:
@@ -826,11 +1020,12 @@ class IdalibManager:
         proc: subprocess.Popen,
         drainer: _StderrDrainer | None,
     ) -> str:
-        instance_id = self._next_cleanup_id(proc.pid)
-        self._processes[instance_id] = proc
-        if drainer is not None:
-            self._stderr_drainers[instance_id] = drainer
-        self._unregistered_sessions.add(instance_id)
+        with self._state_lock:
+            instance_id = self._next_cleanup_id(proc.pid)
+            self._processes[instance_id] = proc
+            if drainer is not None:
+                self._stderr_drainers[instance_id] = drainer
+            self._unregistered_sessions.add(instance_id)
         return instance_id
 
     def _next_cleanup_id(self, pid: int) -> str:
@@ -1011,7 +1206,10 @@ class IdalibManager:
 
         if reconciled_id is not None:
             try:
-                self.registry.unregister(reconciled_id)
+                cleanup_result = self._conditional_unregister(
+                    reconciled_id,
+                    context["ownership_nonce"],
+                )
             except Exception as exc:
                 cleanup_error = str(exc).replace(
                     context["ownership_nonce"],
@@ -1032,8 +1230,43 @@ class IdalibManager:
                     "process_stopped": process_stopped,
                     "registry_cleaned": False,
                 }
+
+            cleanup_error = self._conditional_unregister_error(cleanup_result)
+            if cleanup_error is not None:
+                return {
+                    "ok": False,
+                    "error": (
+                        "Worker stopped, but reconciled registry cleanup failed: "
+                        f"{cleanup_error}"
+                    ),
+                    "instance_id": instance_id,
+                    "registry_instance_id": reconciled_id,
+                    "pid": context["pid"],
+                    "managed": False,
+                    "registered": True,
+                    "registry_state": "committed",
+                    "process_stopped": process_stopped,
+                    "registry_cleaned": False,
+                }
+
             self._pending_registry_contexts.pop(instance_id, None)
             self._unregistered_sessions.discard(instance_id)
+            if cleanup_result["status"] != "removed":
+                return {
+                    "ok": True,
+                    "instance_id": instance_id,
+                    "registry_instance_id": reconciled_id,
+                    "pid": context["pid"],
+                    "managed": False,
+                    "registered": False,
+                    "registry_state": "absent",
+                    "process_stopped": process_stopped,
+                    "registry_cleaned": True,
+                    "note": (
+                        "matching registry generation was already absent or replaced; "
+                        "current owner preserved"
+                    ),
+                }
             return {
                 "ok": True,
                 "instance_id": instance_id,
