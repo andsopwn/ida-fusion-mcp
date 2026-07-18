@@ -883,33 +883,26 @@ def _classify_hit_lines(
     matcher,
     want_disasm: bool,
     want_comments: bool,
-    max_lines: int = 32,
 ) -> list[dict]:
-    out: list[dict] = []
     try:
-        result = ida_lines.generate_disassembly(ea, max_lines, False, False)
+        # Heads() visits every listing item, so render only the current line.
+        # Rendering a 32-line window for every head repeats work and causes
+        # IDA to print "Too many lines" for large items.
+        tagged = ida_lines.generate_disasm_line(ea, 0)
     except Exception:
-        return out
-    lines = None
-    if isinstance(result, tuple):
-        for item in result:
-            if isinstance(item, (list, tuple)) and item and isinstance(item[0], str):
-                lines = list(item)
-                break
-    if lines is None:
-        return out
+        return []
 
-    for tagged in lines:
-        text = ida_lines.tag_remove(tagged) or ""
-        if not text or not matcher(text):
-            continue
-        kind = "comment" if _line_is_comment(tagged) else "disasm"
-        if kind == "disasm" and not want_disasm:
-            continue
-        if kind == "comment" and not want_comments:
-            continue
-        out.append({"kind": kind, "text": text})
-    return out
+    if not tagged:
+        return []
+    text = ida_lines.tag_remove(tagged) or ""
+    if not text or not matcher(text):
+        return []
+    kind = "comment" if _line_is_comment(tagged) else "disasm"
+    if kind == "disasm" and not want_disasm:
+        return []
+    if kind == "comment" and not want_comments:
+        return []
+    return [{"kind": kind, "text": text}]
 
 
 def _exec_segments() -> list[tuple[int, int]]:
@@ -933,50 +926,29 @@ def _all_segments() -> list[tuple[int, int]]:
     return ranges
 
 
-@tool
-@idasync
-def search_text(
-    pattern: Annotated[str, "Text to search for in the rendered listing"],
-    limit: Annotated[int, "Max hits per page (default: 30, max: 500)"] = 30,
-    start: Annotated[str, "Lower bound or cursor address. Empty = first segment."] = "",
-    end: Annotated[str, "Upper bound (exclusive). Empty = last segment."] = "",
-    regex: Annotated[bool, "Treat pattern as a regex"] = False,
-    case_sensitive: Annotated[bool, "Case-sensitive match"] = False,
-    include: Annotated[str, "'disasm' | 'comments' | 'all'"] = "all",
-    code_only: Annotated[bool, "Restrict search to executable segments"] = True,
-) -> dict:
-    """Search rendered listing text over [start, end).
+_SEARCH_TEXT_MAX_HEADS = 512
 
-    This walks IDA heads in bounded chunks instead of calling
-    ida_search.find_text(), which can block inside a large segment without
-    yielding to timeout or cancel handling.
+
+@idasync
+def _search_text_page(
+    limit: int,
+    start: str,
+    end: str,
+    matcher,
+    want_disasm: bool,
+    want_comments: bool,
+    code_only: bool,
+) -> dict:
+    """Scan one bounded page on IDA's main thread.
+
+    The caller deliberately invokes this function once per page. A single
+    long execute_sync callback cannot be safely preempted, so the cursor is
+    also the scheduling boundary that returns control to the MCP worker.
     """
     if limit <= 0:
         limit = 30
     if limit > 500:
         limit = 500
-
-    include = (include or "all").lower()
-    if include not in ("disasm", "comments", "all"):
-        return {"n": 0, "hits": [], "cursor": {"done": True}, "error": f"invalid include: {include!r}"}
-
-    want_disasm = include in ("disasm", "all")
-    want_comments = include in ("comments", "all")
-
-    if regex:
-        try:
-            flags = 0 if case_sensitive else re.IGNORECASE
-            rx = re.compile(pattern, flags)
-        except re.error as e:
-            return {"n": 0, "hits": [], "cursor": {"done": True}, "error": f"invalid regex: {e}"}
-        matcher = lambda s: bool(rx.search(s))
-    else:
-        if case_sensitive:
-            needle = pattern
-            matcher = lambda s: needle in s
-        else:
-            needle = pattern.lower()
-            matcher = lambda s: needle in s.lower()
 
     segments = _exec_segments() if code_only else _all_segments()
     if not segments:
@@ -1004,7 +976,9 @@ def search_text(
     hits: list[dict] = []
     next_cursor: int | None = None
     cancelled = False
-    chunk_bytes = 65536
+    page_limited = False
+    processed_heads = 0
+    chunk_bytes = 8192
     deadline = get_tool_deadline()
 
     for seg_start, seg_end in segments:
@@ -1018,7 +992,7 @@ def search_text(
         walk_end = min(seg_end, end_ea)
         chunk_ea = walk_start
         while chunk_ea < walk_end:
-            if cancelled or len(hits) >= limit:
+            if cancelled or page_limited:
                 break
             if (
                 deadline is not None and time.monotonic() >= deadline
@@ -1028,6 +1002,12 @@ def search_text(
                 break
             chunk_end = min(chunk_ea + chunk_bytes, walk_end)
             for head_ea in idautils.Heads(chunk_ea, chunk_end):
+                if processed_heads >= _SEARCH_TEXT_MAX_HEADS:
+                    page_limited = True
+                    break
+                processed_heads += 1
+                item_end = head_ea + max(1, idaapi.get_item_size(head_ea))
+                next_cursor = min(item_end, end_ea)
                 lines = _classify_hit_lines(head_ea, matcher, want_disasm, want_comments)
                 if not lines:
                     continue
@@ -1044,17 +1024,63 @@ def search_text(
                         entry["segment"] = sname
                 hits.append(entry)
                 if len(hits) >= limit:
-                    size = max(1, idaapi.get_item_size(head_ea))
-                    next_cursor = head_ea + size
+                    page_limited = True
                     break
             chunk_ea = chunk_end
 
     cursor: dict[str, Any]
     if cancelled:
         cursor = {"next": hex(next_cursor) if next_cursor is not None else "", "cancelled": True}
-    elif next_cursor is not None:
+    elif page_limited and next_cursor is not None and next_cursor < end_ea:
         cursor = {"next": hex(next_cursor)}
     else:
         cursor = {"done": True}
 
     return {"n": len(hits), "hits": hits, "cursor": cursor}
+
+
+@tool
+def search_text(
+    pattern: Annotated[str, "Text to search for in the rendered listing"],
+    limit: Annotated[int, "Max hits per page (default: 30, max: 500)"] = 30,
+    start: Annotated[str, "Lower bound or cursor address. Empty = first segment."] = "",
+    end: Annotated[str, "Upper bound (exclusive). Empty = last segment."] = "",
+    regex: Annotated[bool, "Treat pattern as a regex"] = False,
+    case_sensitive: Annotated[bool, "Case-sensitive match"] = False,
+    include: Annotated[str, "'disasm' | 'comments' | 'all'"] = "all",
+    code_only: Annotated[bool, "Restrict search to executable segments"] = True,
+) -> dict:
+    """Search rendered listing text over [start, end) in bounded pages."""
+    if limit <= 0:
+        limit = 30
+    if limit > 500:
+        limit = 500
+
+    include = (include or "all").lower()
+    if include not in ("disasm", "comments", "all"):
+        return {"n": 0, "hits": [], "cursor": {"done": True}, "error": f"invalid include: {include!r}"}
+
+    want_disasm = include in ("disasm", "all")
+    want_comments = include in ("comments", "all")
+    if regex:
+        try:
+            flags = 0 if case_sensitive else re.IGNORECASE
+            rx = re.compile(pattern, flags)
+        except re.error as e:
+            return {"n": 0, "hits": [], "cursor": {"done": True}, "error": f"invalid regex: {e}"}
+        matcher = lambda text: bool(rx.search(text))
+    elif case_sensitive:
+        matcher = lambda text: pattern in text
+    else:
+        needle = pattern.lower()
+        matcher = lambda text: needle in text.lower()
+
+    return _search_text_page(
+        limit,
+        start,
+        end,
+        matcher,
+        want_disasm,
+        want_comments,
+        code_only,
+    )
